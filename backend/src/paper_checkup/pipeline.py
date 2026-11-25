@@ -73,12 +73,15 @@ class Tracker:
         return list(self.stages.values())
 
 
-def _pipeline_info(cfg: LLMConfig | None, client: LLMClient | None, tracker: Tracker) -> PipelineInfo:
+def _pipeline_info(cfg: LLMConfig | None, client: LLMClient | None, tracker: Tracker,
+                   llm_on: bool | None = None) -> PipelineInfo:
+    # llm_enabled describes this report (did the LLM stages run on it), not whether the server has an LLM configured.
+    on = bool(cfg and cfg.enabled) if llm_on is None else llm_on
     return PipelineInfo(
         version=__version__,
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        llm_enabled=bool(cfg and cfg.enabled),
-        models=dict(cfg.models) if cfg and cfg.enabled else {},
+        llm_enabled=on,
+        models=dict(cfg.models) if cfg and on else {},
         stages=tracker.list(),
         llm_calls=client.stats.calls if client else 0,
         llm_cached=client.stats.cached if client else 0,
@@ -113,9 +116,9 @@ async def run_pipeline(root: Path, *, paper_id: str | None = None, arxiv_id: str
     tracker.done("parse", f"{sum(1 for n in ctx.nodes.values() if n.kind not in ('equation', 'external'))} 个条目，{len(ctx.edges)} 条依赖")
     tracker.stages["checks"].status = "done"
     if partial:
-        partial(assemble_report(ctx, _pipeline_info(cfg, None, tracker)))
+        partial(assemble_report(ctx, _pipeline_info(cfg, None, tracker, llm_on)))
     if not llm_on:
-        return assemble_report(ctx, _pipeline_info(cfg, None, tracker))
+        return assemble_report(ctx, _pipeline_info(cfg, None, tracker, llm_on))
 
     client = LLMClient(cfg, use_cache=use_cache)
     review_max = review_max if review_max is not None else int(__import__("os").environ.get("REVIEW_MAX_TARGETS", "30"))

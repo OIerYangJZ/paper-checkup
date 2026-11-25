@@ -26,17 +26,23 @@ export function loadPresetReport(entry: PresetEntry): Promise<Report> {
   return getJson<Report>(`${DATA}/${entry.file}`);
 }
 
-export async function health(): Promise<Health | null> {
-  try {
+// The public API sits behind a Tailscale Funnel relay; the first TLS handshake alone can take ~2-3 s from far away,
+// so be patient (the UI shows "连接中" meanwhile) and retry once before falling back to demo mode.
+export async function health(timeoutMs = 12000, retries = 1): Promise<Health | null> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
     const ctl = new AbortController();
-    const t = setTimeout(() => ctl.abort(), 2500);
-    const r = await fetch(`${API}/api/health`, { signal: ctl.signal });
-    clearTimeout(t);
-    if (!r.ok) return null;
-    return (await r.json()) as Health;
-  } catch {
-    return null;
+    const t = setTimeout(() => ctl.abort(), timeoutMs);
+    try {
+      const r = await fetch(`${API}/api/health`, { signal: ctl.signal });
+      if (r.ok) return (await r.json()) as Health;
+      if (r.status < 500) return null;
+    } catch {
+      /* network error or timeout: retry */
+    } finally {
+      clearTimeout(t);
+    }
   }
+  return null;
 }
 
 export async function startAnalysis(opts: {

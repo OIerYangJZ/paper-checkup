@@ -105,3 +105,11 @@ def test_pipeline_with_fake_llm(monkeypatch, tmp_path):
     assert minor and minor[0].title == "记号表述" and minor[0].original_severity in (None, "low")
     assert rep.pipeline.llm_enabled and events
     assert all(s.status in ("done", "skipped") for s in rep.pipeline.stages)
+
+
+def test_llm_disabled_per_run_is_reported(tmp_path):
+    # The server has an LLM configured, but this run asked for deterministic analysis only.
+    cfg = LLMConfig(enabled=True, provider="fake", models={"extract": "fake", "author": "fake", "reviewer": "fake"},
+                    cache_dir=tmp_path)
+    rep = asyncio.run(run_pipeline(FIXTURE, config=cfg, use_llm=False, use_cache=False))
+    assert rep.pipeline.llm_enabled is False and rep.pipeline.models == {}
