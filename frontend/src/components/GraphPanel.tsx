@@ -41,7 +41,9 @@ function nodeLabel(n: PaperNode): string {
   if (n.kind === "external") return n.external?.source === "llm" ? `◇ ${shortTitle(n.title, 22)}` : `[${shortTitle(n.title, 18)}]`;
   if (n.kind === "equation") return `(${n.number ?? "?"})`;
   const name = nodeName(n);
-  const t = n.title ? shortTitle(n.title, 22) : "";
+  if (n.kind === "section" && !n.number) return name;
+  // Floats have no title: show the start of the caption instead.
+  const t = n.title ? shortTitle(n.title, 22) : ["figure", "table", "pseudocode"].includes(n.kind) ? shortTitle(n.statement, 20) : "";
   return t ? `${name}\n${t}` : name;
 }
 
@@ -95,7 +97,10 @@ export function GraphPanel({ filters, setFilters, selected, path, focusToken, fo
     const els: ElementDefinition[] = [];
     for (const n of report.nodes) {
       if (!visible.has(n.id)) continue;
-      if ((n.kind === "external" || n.kind === "equation") && !connected.has(n.id)) continue;
+      // Unconnected equations, externals and (structure mode) sections only add noise; the outline lists them.
+      if ((n.kind === "external" || n.kind === "equation" || n.kind === "section" || n.kind === "figure" || n.kind === "table" || n.kind === "pseudocode") &&
+        !connected.has(n.id) &&
+        !forced.has(n.id)) continue;
       const label = nodeLabel(n);
       const lines = label.split("\n");
       const w = Math.max(n.kind === "equation" ? 46 : 70, Math.max(...lines.map(textWidth)) + 26);
@@ -122,7 +127,7 @@ export function GraphPanel({ filters, setFilters, selected, path, focusToken, fo
       els.push({ data: { id: e.id, source: e.source, target: e.target }, classes: cls.join(" ") });
     }
     return els;
-  }, [report, index, forcedKey, filters.pathOnly, filters.showRemarks, filters.showEquations, filters.showExternal, filters.explicit, filters.inferred, filters.symbol]);
+  }, [report, index, forced, forcedKey, filters.pathOnly, filters.showRemarks, filters.showEquations, filters.showExternal, filters.explicit, filters.inferred, filters.symbol]);
 
   // (Re)create the graph when elements or direction change.
   useEffect(() => {
@@ -157,6 +162,10 @@ export function GraphPanel({ filters, setFilters, selected, path, focusToken, fo
         { selector: "node.theorem", style: { "border-width": 2.6, "font-weight": 800, "font-size": 12.5 } },
         { selector: "node.definition, node.notation", style: { "corner-radius": "3" } },
         { selector: "node.equation", style: { shape: "ellipse", "font-size": 10.5, color: "#475569" } },
+        // Structure mode: sections are plain boxes, figures/tables cut corners, claims stand out.
+        { selector: "node.section", style: { shape: "rectangle", "font-weight": 600, "border-width": 1.2 } },
+        { selector: "node.figure, node.table, node.pseudocode, node.listing", style: { shape: "cut-rectangle", "font-weight": 600 } },
+        { selector: "node.assertion", style: { "border-width": 2.4, "font-weight": 800 } },
         { selector: "node.external", style: { shape: "round-tag", "border-style": "dashed", "background-color": "#f8fafc", color: "#64748b", "font-weight": 500 } },
         { selector: "node.conjecture, node.assumption", style: { "border-style": "dashed" } },
         { selector: "node.remark, node.example, node.problem, node.other", style: { "background-color": "#fafafa", color: "#64748b", "font-weight": 500 } },

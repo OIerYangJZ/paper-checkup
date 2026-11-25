@@ -487,3 +487,14 @@ button.tg:hover { color: var(--ink); }
   .paper-view { grid-template-columns: 1fr; grid-template-rows: 60vh auto; }
   .side-panel { border-left: none; border-top: 1px solid var(--line); }
 }
+
+/* Structure mode (papers without theorem-like environments) */
+.mode-banner {
+  display: flex; gap: 10px; align-items: flex-start;
+  margin: 14px 0 4px; padding: 10px 12px;
+  background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: var(--radius);
+  color: var(--text-2); font-size: 13px; line-height: 1.6;
+}
+.mode-banner > svg { flex: none; margin-top: 3px; color: var(--accent); }
+.mode-banner strong { color: var(--ink); }
+.unit-text { max-height: 340px; overflow: auto; }

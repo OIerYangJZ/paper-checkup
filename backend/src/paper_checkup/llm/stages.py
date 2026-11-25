@@ -14,7 +14,7 @@ from ..latex.preamble import PROVABLE_KINDS
 from ..models import DebateTurn, Edge, Evidence, ExternalInfo, Node, ProofInfo, Risk
 from . import prompts as P
 from .context import digest, full_paper, locate_quote, loc_at, node_header, node_regions, numbered, render
-from .provider import LLMClient, LLMError
+from .provider import BudgetExceeded, LLMClient, LLMError
 
 log = logging.getLogger("paper_checkup.stages")
 
@@ -41,6 +41,10 @@ def _clip(s: str, n: int) -> str:
     return s if len(s) <= n else s[:n] + "\n…（截断）"
 
 
+def _system(ctx: AnalysisContext, client: LLMClient) -> str:
+    return P.shared_system(client.config.language, ctx.gb.mode)
+
+
 def paper_prefix(ctx: AnalysisContext) -> str:
     """Full paper text, computed once per analysis: the shared cached prefix of every debate call."""
     if "paper_prefix" not in ctx.extra:
@@ -49,14 +53,22 @@ def paper_prefix(ctx: AnalysisContext) -> str:
 
 
 async def prewarm(ctx: AnalysisContext, client: LLMClient) -> None:
-    """Write the shared prefix (rule book + full paper) to the provider's prompt cache before fanning out."""
-    try:
-        await client.json("reviewer", P.shared_system(client.config.language),
-                          [paper_prefix(ctx), "这是缓存预热请求。请只返回 {\"ok\": true}。"],
-                          {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"],
-                           "additionalProperties": False}, "prewarm", max_tokens=2000, use_disk_cache=False)
-    except LLMError as e:  # best effort
-        log.info("预热失败（不影响结果）：%s", e)
+    """Write the shared prefix (rule book + full paper) to each debate model's prompt cache before fanning out
+    (author and reviewer may be different providers, e.g. DeepSeek and OpenAI)."""
+    roles: dict[str, str] = {}
+    for role in ("reviewer", "author"):
+        roles.setdefault(client.config.models.get(role) or client.config.models.get("extract", ""), role)
+
+    async def one(role: str):
+        try:
+            await client.json(role, _system(ctx, client),
+                              [paper_prefix(ctx), "这是缓存预热请求。请只返回 {\"ok\": true}。"],
+                              {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"],
+                               "additionalProperties": False}, "prewarm", max_tokens=2000, use_disk_cache=False)
+        except LLMError as e:  # best effort
+            log.info("预热失败（不影响结果）：%s", e)
+
+    await asyncio.gather(*(one(r) for r in roles.values()))
 
 
 # Severity ceilings per error type (deterministic policy applied on top of the model's grading).
@@ -317,7 +329,7 @@ async def stage_symbol_debate(ctx: AnalysisContext, client: LLMClient, progress:
     if not flagged:
         return {"debated": 0}
     paper = paper_prefix(ctx)
-    system = P.shared_system(lang)
+    system = _system(ctx, client)
     lines = []
     for s in flagged:
         issues = []
@@ -392,7 +404,7 @@ async def stage_unsupported(ctx: AnalysisContext, client: LLMClient, progress: P
     if not risks:
         return {"checked": 0}
     paper = paper_prefix(ctx)
-    system = P.shared_system(lang)
+    system = _system(ctx, client)
     done = 0
 
     async def run(risk: Risk):
@@ -470,8 +482,8 @@ def select_review_targets(ctx: AnalysisContext, max_targets: int) -> list[str]:
         score = KIND_WEIGHT.get(n.kind, 1) + min(4, len(preds) * 0.5) + min(3, gaps) + min(3, n.proof_chars / 3000)
         cands.append((score, n.order, n.id))
     cands.sort(key=lambda t: (-t[0], t[1]))
-    chosen = [nid for _, _, nid in cands[:max_targets]]
-    return sorted(chosen, key=lambda nid: ctx.nodes[nid].order)
+    # Highest priority first: debates start in this order, so a spend limit cuts the least important ones.
+    return [nid for _, _, nid in cands[:max_targets]]
 
 
 def review_context(ctx: AnalysisContext, nid: str) -> str:
@@ -509,7 +521,7 @@ def review_context(ctx: AnalysisContext, nid: str) -> str:
 
 
 async def _review_one(ctx: AnalysisContext, client: LLMClient, nid: str, paper: str) -> list[Risk]:
-    system = P.shared_system(client.config.language)
+    system = _system(ctx, client)
     node = ctx.nodes[nid]
     rc = review_context(ctx, nid)
     author_ctx = P.AUTHOR_ROLE + "\n\n" + rc
@@ -534,10 +546,21 @@ async def _review_one(ctx: AnalysisContext, client: LLMClient, nid: str, paper: 
                            [paper, reviewer_ctx, "## 作者对关键步骤的说明\n" + steps_txt, "## 你提出的质疑\n" + ch_txt,
                             "## 作者的回应\n" + resp_txt, P.REVIEWER_VERDICT_TASK], P.VERDICT_SCHEMA,
                            "reviewer_verdict", max_tokens=8000)
+    regions = node_regions(ctx, nid, include_lead=True) + [(ctx.paper.body_start, ctx.paper.body_end)]
+    risks = _debate_risks(ctx, nid, a1, challenges, a2, r2, regions)
+    substantive = [r for r in risks if r.status != "minor"]
+    node.review.update({"status": "issues" if substantive else "passed", "unresolved": len(substantive),
+                        "minor": len(risks) - len(substantive)})
+    return risks
+
+
+def _debate_risks(ctx: AnalysisContext, nid: str, a1: dict, challenges: list[dict], a2: dict, r2: dict,
+                  regions: list[tuple[int, int]], step_label: str = "作者 · 步骤依据") -> list[Risk]:
+    """Risks for the challenges that the verdict left unresolved / minor, with the debate transcript."""
+    node = ctx.nodes[nid]
     steps = {s.get("step_id"): s for s in a1.get("steps", [])}
     responses = {x.get("challenge_id"): x for x in a2.get("responses", [])}
     verdicts = {x.get("challenge_id"): x for x in r2.get("verdicts", [])}
-    regions = node_regions(ctx, nid, include_lead=True) + [(ctx.paper.body_start, ctx.paper.body_end)]
     risks = []
     stance_label = {"defend": "辩护", "minor": "次要", "partial": "部分承认", "concede": "承认"}
     for c in challenges:
@@ -552,7 +575,8 @@ async def _review_one(ctx: AnalysisContext, client: LLMClient, nid: str, paper: 
         related = [nid]
         if step:
             related += [u for u in step.get("uses", []) if u in ctx.nodes and u != nid]
-        related += [m for m in re.findall(r"\b((?:lem|thm|prop|cor|def|claim|fact|conj|asm|rem)-[\w.]+)", c.get("concern", ""))
+        related += [m for m in re.findall(r"\b((?:lem|thm|prop|cor|def|claim|fact|conj|asm|rem|tab|fig|sec|eq|alg|as)-[\w.]+)",
+                                          c.get("concern", ""))
                     if m in ctx.nodes and m not in related]
         sev = v.get("severity") or c.get("severity", "medium")
         if v.get("verdict") == "minor":
@@ -561,7 +585,7 @@ async def _review_one(ctx: AnalysisContext, client: LLMClient, nid: str, paper: 
         sev = cap_severity(sev, error_type)
         debate = []
         if step:
-            debate.append(DebateTurn(role="author", stage="作者 · 步骤依据",
+            debate.append(DebateTurn(role="author", stage=step_label,
                                      content=_clean(f"{step.get('claim', '')}\n依据：{step.get('justification', '')}"
                                              + (f"\n前提核对：{step['hypotheses_check']}" if step.get("hypotheses_check") not in (None, "", "无") else ""))))
         debate.append(DebateTurn(role="reviewer", stage="审稿人 · 质疑",
@@ -578,9 +602,6 @@ async def _review_one(ctx: AnalysisContext, client: LLMClient, nid: str, paper: 
             status="minor" if v.get("verdict") == "minor" else ("conceded" if resp.get("stance") == "concede" else "unresolved"),
             debate=debate, author_position=_clean(resp.get("response")), reviewer_position=_clean(v.get("final_comment")),
             error_type=error_type))
-    substantive = [r for r in risks if r.status != "minor"]
-    node.review.update({"status": "issues" if substantive else "passed", "unresolved": len(substantive),
-                        "minor": len(risks) - len(substantive)})
     return risks
 
 
@@ -594,10 +615,16 @@ async def stage_review(ctx: AnalysisContext, client: LLMClient, max_targets: int
     done = 0
     total_risks: list[Risk] = []
 
+    budget_skipped = 0
+
     async def run(nid):
-        nonlocal done
+        nonlocal done, budget_skipped
         try:
             rs = await _review_one(ctx, client, nid, paper)
+        except BudgetExceeded as e:
+            ctx.nodes[nid].review = {"status": "skipped", "reason": "budget", "error": str(e)}
+            budget_skipped += 1
+            rs = []
         except LLMError as e:
             log.warning("审稿对抗失败 %s：%s", nid, e)
             ctx.nodes[nid].review = {"status": "error", "error": str(e)[:200]}
@@ -611,8 +638,196 @@ async def stage_review(ctx: AnalysisContext, client: LLMClient, max_targets: int
     for i, r in enumerate(total_risks):
         r.id = f"R{i + 1}"
     ctx.risks.extend(total_risks)
-    return {"targets": len(targets), "risks": sum(1 for r in total_risks if r.status != "minor"),
+    return {"targets": len(targets) - budget_skipped, "budget_skipped": budget_skipped,
+            "risks": sum(1 for r in total_risks if r.status != "minor"),
             "minor": sum(1 for r in total_risks if r.status == "minor")}
+
+
+# ---------------------------------------------------------------------------
+# Structure mode: core claims, claim review (author / reviewer debate), numeric cross-check
+# ---------------------------------------------------------------------------
+
+MAX_CLAIMS = 12
+
+
+async def stage_claims(ctx: AnalysisContext, client: LLMClient, progress: Progress = _noop) -> dict:
+    """Extract the paper's core claims; each must be located verbatim in the text, or it is dropped."""
+    paper = paper_prefix(ctx)
+    data = await client.json("extract", _system(ctx, client), [paper, P.CLAIMS_TASK], P.CLAIMS_SCHEMA, "claims",
+                             max_tokens=12000)
+    body = [(ctx.paper.body_start, ctx.paper.body_end)]
+    gb = ctx.gb
+    claims: list[str] = []
+    seen: list[int] = []
+    dropped = 0
+    per_unit: dict[str, int] = {}
+    for c in data.get("claims", []):
+        if len(claims) >= MAX_CLAIMS:
+            break
+        quote = _clean(c.get("quote") or "")
+        off = locate_quote(ctx, quote, body, line_hint=c.get("line"), line_fallback=False)
+        if off is None or not quote:
+            dropped += 1
+            continue
+        if any(abs(off - o) < 40 for o in seen):
+            continue
+        seen.append(off)
+        unit = gb.unit_at(off)
+        un = ctx.nodes.get(unit) if unit else None
+        cid = f"as-{len(claims) + 1}"
+        per_unit[unit or ""] = per_unit.get(unit or "", 0) + 1
+        node = Node(id=cid, kind="assertion", display="论断", number=str(len(claims) + 1),
+                    title=_clean(c.get("summary") or "")[:60] or None, statement=quote,
+                    loc=loc_at(ctx, off, len(quote)), section_id=un.section_id if un else None,
+                    parent=unit, order=(un.order if un else 0) + min(9, per_unit[unit or ""]),
+                    flags=[f"claim:{c.get('kind') or 'other'}", f"importance:{c.get('importance') or 'supporting'}"],
+                    statement_chars=len(quote))
+        ctx.nodes[cid] = node
+        for eid in c.get("evidence_ids") or []:
+            if eid in ctx.nodes and eid != cid and ctx.nodes[eid].kind not in ("assertion", "external"):
+                gb.add_edge(eid, cid, "inferred", "statement", "llm",
+                            Evidence(loc=node.loc, text=quote[:300], via="llm", context="statement"),
+                            confidence=0.8, reason=f"论断抽取阶段标注的证据：{ctx.node_name(eid)}")
+        claims.append(cid)
+    ctx.edges[:] = list(gb.edges.values())
+    ctx.extra["claims"] = claims
+    return {"claims": len(claims), "dropped": dropped}
+
+
+def claim_context(ctx: AnalysisContext, cid: str) -> str:
+    n = ctx.nodes[cid]
+    unit = n.parent if n.parent in ctx.nodes else None
+    where = f"，位于 {ctx.node_name(unit)}" if unit else ""
+    out = [f"# 待审查论断 [{cid}]{where}（{n.loc.file}:L{n.loc.line_start}）" if n.loc else f"# 待审查论断 [{cid}]",
+           "## 论断原文", render(ctx, n.statement)]
+    if n.title:
+        out.append(f"概括：{n.title}")
+    evid = [e.source for e in ctx.edges if e.target == cid and e.source in ctx.nodes]
+    if evid:
+        out.append("## 论断抽取阶段为它标注的证据（内容见全文中的同名标记；全文中也可检索其他证据）")
+        for eid in evid:
+            m = ctx.nodes[eid]
+            rng = m.loc
+            span = f"{rng.file}:L{rng.line_start}–{rng.line_end}" if rng else ""
+            cap = f"：{_clip(render(ctx, m.statement), 300)}" if m.kind in ("table", "figure", "pseudocode", "equation") else ""
+            out.append(f"- [{eid}] {ctx.node_name(eid)}（{span}）{cap}")
+    else:
+        out.append("## 论断抽取阶段没有为它标注证据（请在全文中检索）")
+    cands = [c for c in getattr(ctx.checker, "numeric_candidates", [])
+             if {c["a_unit"], c["b_unit"]} & ({unit} | set(evid))]
+    if cands:
+        out.append("## 程序找到的相关数字不一致候选（启发式配对，需要核实）")
+        for c in cands:
+            out.append(f"- {c['metric']}：{c['a']}（{c['a_loc'].file}:L{c['a_loc'].line_start}）与 {c['b']}"
+                       f"（{c['b_loc'].file}:L{c['b_loc'].line_start}）。{c['table_note']}")
+    return "\n".join(out)
+
+
+async def _review_claim(ctx: AnalysisContext, client: LLMClient, cid: str, paper: str) -> list[Risk]:
+    system = _system(ctx, client)
+    node = ctx.nodes[cid]
+    cc = claim_context(ctx, cid)
+    author_ctx = P.CLAIM_AUTHOR_ROLE + "\n\n" + cc
+    reviewer_ctx = P.CLAIM_REVIEWER_ROLE + "\n\n" + cc
+    a1 = await client.json("author", system, [paper, author_ctx, P.CLAIM_AUTHOR_TASK], P.STEPS_SCHEMA,
+                           "claim_steps", max_tokens=8000)
+    steps_txt = json.dumps(a1, ensure_ascii=False, indent=1)
+    r1 = await client.json("reviewer", system,
+                           [paper, reviewer_ctx, "## 作者给出的证据链\n" + steps_txt, P.CLAIM_REVIEWER_TASK],
+                           P.CLAIM_CHALLENGES_SCHEMA, "claim_challenges", max_tokens=8000)
+    challenges = [c for c in r1.get("challenges", []) if c.get("concern")]
+    node.review = {"status": "passed", "steps": len(a1.get("steps", [])), "challenges": len(challenges), "unresolved": 0}
+    if not challenges:
+        return []
+    ch_txt = json.dumps({"challenges": challenges}, ensure_ascii=False, indent=1)
+    a2 = await client.json("author", system,
+                           [paper, author_ctx, "## 你之前给出的证据链\n" + steps_txt, "## 审稿人的质疑\n" + ch_txt,
+                            P.CLAIM_REBUTTAL_TASK], P.REBUTTAL_SCHEMA, "claim_rebuttal", max_tokens=8000)
+    resp_txt = json.dumps(a2, ensure_ascii=False, indent=1)
+    r2 = await client.json("reviewer", system,
+                           [paper, reviewer_ctx, "## 作者给出的证据链\n" + steps_txt, "## 你提出的质疑\n" + ch_txt,
+                            "## 作者的回应\n" + resp_txt, P.CLAIM_VERDICT_TASK], P.VERDICT_SCHEMA,
+                           "claim_verdict", max_tokens=8000)
+    risks = _debate_risks(ctx, cid, a1, challenges, a2, r2, [(ctx.paper.body_start, ctx.paper.body_end)],
+                          step_label="作者 · 证据")
+    substantive = [r for r in risks if r.status != "minor"]
+    node.review.update({"status": "issues" if substantive else "passed", "unresolved": len(substantive),
+                        "minor": len(risks) - len(substantive)})
+    return risks
+
+
+async def stage_claim_review(ctx: AnalysisContext, client: LLMClient, progress: Progress = _noop) -> dict:
+    claims = list(ctx.extra.get("claims", []))
+    # Core claims first, so a spend limit cuts the supporting ones.
+    claims.sort(key=lambda c: (0 if "importance:core" in ctx.nodes[c].flags else 1, ctx.nodes[c].order))
+    paper = paper_prefix(ctx)
+    done = budget_skipped = 0
+    out: list[Risk] = []
+
+    async def run(cid):
+        nonlocal done, budget_skipped
+        try:
+            rs = await _review_claim(ctx, client, cid, paper)
+        except BudgetExceeded as e:
+            ctx.nodes[cid].review = {"status": "skipped", "reason": "budget", "error": str(e)}
+            budget_skipped += 1
+            rs = []
+        except LLMError as e:
+            log.warning("论断审查失败 %s：%s", cid, e)
+            ctx.nodes[cid].review = {"status": "error", "error": str(e)[:200]}
+            rs = []
+        done += 1
+        progress("claim_review", done, len(claims), f"论断审查 {done}/{len(claims)}：{ctx.node_name(cid)}")
+        return rs
+
+    for rs in await asyncio.gather(*(run(c) for c in claims)):
+        out.extend(rs)
+    for i, r in enumerate(out):
+        r.id = f"Q{i + 1}"
+    ctx.risks.extend(out)
+    return {"claims": len(claims) - budget_skipped, "budget_skipped": budget_skipped,
+            "risks": sum(1 for r in out if r.status != "minor"), "minor": sum(1 for r in out if r.status == "minor")}
+
+
+async def stage_numeric_check(ctx: AnalysisContext, client: LLMClient, progress: Progress = _noop) -> dict:
+    """The reviewer confirms or dismisses the program's numeric-inconsistency candidates (one call)."""
+    cands = list(getattr(ctx.checker, "numeric_candidates", []))
+    if not cands:
+        return {"checked": 0}
+    lines = []
+    for c in cands:
+        lines.append(f"- id={c['risk_id']} 指标 {c['metric']}：{c['a']}（{ctx.node_name(c['a_unit'])}，{c['a_loc'].file}:L{c['a_loc'].line_start}）"
+                     f" 与 {c['b']}（{ctx.node_name(c['b_unit'])}，{c['b_loc'].file}:L{c['b_loc'].line_start}）。{c['table_note']}\n"
+                     f"  · {render(ctx, c['a_sent'])}\n  · {render(ctx, c['b_sent'])}")
+    data = await client.json("reviewer", _system(ctx, client),
+                             [paper_prefix(ctx), P.NUMERIC_TASK, "## 候选\n" + "\n".join(lines)],
+                             P.NUMERIC_SCHEMA, "numeric_check", max_tokens=8000)
+    by_id = {r.id: r for r in ctx.risks if r.source == "structural" and r.category == "numeric"}
+    confirmed = dismissed = 0
+    for it in data.get("items", []):
+        r = by_id.get(it.get("id"))
+        if r is None:
+            continue
+        verdict = it.get("verdict")
+        comment = _clean(it.get("comment") or "")
+        if verdict == "different":
+            ctx.risks.remove(r)
+            dismissed += 1
+            continue
+        program = DebateTurn(role="reviewer", stage="程序检测", content=r.description)
+        check = DebateTurn(role="reviewer", stage="审稿人 · 核对", content=comment)
+        if verdict == "inconsistent":
+            sev = it.get("severity") if it.get("severity") in ("high", "medium", "low", "info") else "medium"
+            r.source, r.severity, r.status = "review", sev, "unresolved"
+            r.title = _clean(it.get("title")) or r.title
+            r.reviewer_position = comment
+            r.error_type = "logic"
+            r.debate = [program, check]
+            confirmed += 1
+        else:   # unclear: keep the program's candidate, with the reviewer's note
+            r.editor_note = comment
+            r.debate = [program, check]
+    return {"checked": len(cands), "confirmed": confirmed, "dismissed": dismissed}
 
 
 # ---------------------------------------------------------------------------
@@ -675,10 +890,10 @@ async def stage_meta_review(ctx: AnalysisContext, client: LLMClient, progress: P
             f"{ {'conceded': '作者承认', 'minor': '双方认为次要', 'unresolved': '作者未接受'}.get(r.status, r.status) }）\n"
             f"标题：{r.title}\n质疑：{_clip(r.description or '', 900)}\n审稿人最终意见：{_clip(r.reviewer_position or '', 500)}\n"
             f"作者回应：{_clip(r.author_position or '', 400)}")
-    data = await client.json("reviewer", P.shared_system(client.config.language),
+    data = await client.json("reviewer", _system(ctx, client),
                              [paper_prefix(ctx), P.EDITOR_ROLE + f"\n\n## 涉及条目的陈述\n{stmts}",
                               "## 未被化解的质疑\n\n" + "\n\n".join(items)],
-                             P.META_SCHEMA, "meta_review", max_tokens=12000)
+                             P.META_SCHEMA, "meta_review", max_tokens=12000, budget_reserve=0.0)
     decided = 0
     merged = 0
     changed = 0

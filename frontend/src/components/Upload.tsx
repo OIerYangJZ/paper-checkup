@@ -160,7 +160,7 @@ export function UploadPanel({ health, onOpen }: { health: Health | null | undefi
         <div className="upload-options">
           <label title={llmAvailable ? "" : health?.llm.reason ?? "后端未配置大模型"}>
             <input type="checkbox" checked={useLlm && llmAvailable} disabled={!llmAvailable} onChange={(e) => setUseLlm(e.target.checked)} />
-            运行大模型阶段（隐式引用、符号含义、审稿对抗）
+            运行大模型阶段（隐式引用、符号含义、审稿对抗；没有定理的论文审查核心论断）
           </label>
           {!llmAvailable && health ? <span className="muted small">大模型不可用：{health.llm.reason}</span> : null}
           {useLlm && llmAvailable && health?.llm.requires_token ? (
@@ -186,7 +186,17 @@ export function UploadPanel({ health, onOpen }: { health: Health | null | undefi
           ) : null}
           {llmAvailable ? (
             <span className="muted small" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-              <Cpu size={12} /> {Object.values(health!.llm.models).filter((v, i, a) => a.indexOf(v) === i).join(" / ")}
+              <Cpu size={12} /> {Object.values(health!.llm.models).filter((v, i, a) => a.indexOf(v) === i).map((m) => m.split(":").pop()).join(" / ")}
+            </span>
+          ) : null}
+          {llmAvailable && health?.llm.budget && (health.llm.budget.per_job != null || health.llm.budget.per_day != null) ? (
+            <span className={`small ${health.llm.budget.day_exhausted ? "warn-text" : "muted"}`}>
+              {health.llm.budget.day_exhausted
+                ? `今天的大模型额度（$${health.llm.budget.per_day}）已用完，现在只能做确定性分析，明天自动恢复`
+                : `花费上限：每篇 $${health.llm.budget.per_job ?? "不限"}` +
+                  (health.llm.budget.per_day != null
+                    ? `，今天已用 $${health.llm.budget.spent_today.toFixed(2)} / $${health.llm.budget.per_day}`
+                    : "")}
             </span>
           ) : null}
         </div>

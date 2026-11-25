@@ -8,9 +8,9 @@ rep = json.load(open(sys.argv[2]))
 order = ["high", "medium", "low", "info"]
 new = [r for r in rep["risks"] if r["source"] == "review"]
 p = rep["pipeline"]
-cost = (p["tokens_in"] - (p.get("tokens_cached") or 0)) * 8e-6 + (p.get("tokens_cached") or 0) * 0.4e-6 + p["tokens_out"] * 40e-6
 print(f"calls={p['llm_calls']} cached_calls={p['llm_cached']} in={p['tokens_in']} cached_tokens={p.get('tokens_cached')} "
-      f"out={p['tokens_out']} -> ≈${cost:.2f} (counts include cached responses)")
+      f"out={p['tokens_out']} (token counts include cached responses) | spend of this run ≈${p.get('cost_usd', 0):.2f} "
+      f"| models {p.get('models')}")
 for s in p["stages"]:
     print(f"  [{s['status']}] {s['detail']}")
 print("\nnew review risks by severity:", dict(Counter(r["severity"] for r in new)),

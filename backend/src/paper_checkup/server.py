@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import os
+import shutil
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
+from .llm.pricing import SpendLedger, server_budget
 from .llm.provider import LLMConfig
 from .pipeline import run_pipeline
 from .settings import FRONTEND_DIST, PRESET_DATA_DIR, UPLOAD_DIR, load_env
@@ -55,6 +57,8 @@ _tasks: set[asyncio.Task] = set()
 LLM_TOKEN = os.environ.get("ANALYZE_LLM_TOKEN", "").strip()
 SERVE_STATIC = os.environ.get("SERVE_STATIC", "1").strip().lower() not in ("0", "false", "no", "off")
 CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
+# Daily LLM spend of web-started analyses (limits: LLM_BUDGET_PER_JOB_USD / LLM_BUDGET_PER_DAY_USD).
+LEDGER = SpendLedger(Path(os.environ.get("LLM_SPEND_FILE") or (UPLOAD_DIR.parent / "spend.json")))
 
 app = FastAPI(title="Paper Checkup", version=__version__)
 app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["GET", "POST"], allow_headers=["*"])
@@ -69,9 +73,12 @@ def _token_ok(given: str | None) -> bool:
 @app.get("/api/health")
 def health():
     cfg = LLMConfig.from_env()
+    b = server_budget(LEDGER)
     return {"ok": True, "version": __version__,
             "llm": {"enabled": cfg.enabled, "provider": cfg.provider, "models": cfg.models if cfg.enabled else {},
-                    "reason": cfg.reason_disabled, "requires_token": bool(LLM_TOKEN)}}
+                    "reason": cfg.reason_disabled, "requires_token": bool(LLM_TOKEN),
+                    "budget": {"per_job": b.per_job, "per_day": b.per_day,
+                               "spent_today": round(LEDGER.spent_today(), 4), "day_exhausted": b.day_exhausted()}}}
 
 
 @app.get("/api/papers")
@@ -101,7 +108,8 @@ async def _run_job(job: Job, root: Path, arxiv_id: str | None, use_llm: bool, re
                 job.title = rep.paper.title
 
             rep = await run_pipeline(root, paper_id=f"upload-{job.id}", arxiv_id=arxiv_id, use_llm=use_llm,
-                                     review_max=review_max, progress=on_progress, partial=on_partial)
+                                     review_max=review_max, progress=on_progress, partial=on_partial,
+                                     budget=server_budget(LEDGER) if use_llm else None)
             job.report_json = rep.model_dump_json()
             job.title = rep.paper.title
             out = UPLOAD_DIR / job.id / "report.json"
@@ -126,15 +134,24 @@ async def analyze(files: list[UploadFile] | None = File(default=None), arxiv_id:
     if use_llm and not _token_ok(access_token):
         raise HTTPException(403, "运行大模型阶段需要访问口令（口令错误或未填写）；不填口令可以只做确定性分析。")
     job = Job(id=uuid.uuid4().hex[:12])
-    root = UPLOAD_DIR / job.id / "src"
+    job_dir = UPLOAD_DIR / job.id
+    root = job_dir / "src"
     root.mkdir(parents=True, exist_ok=True)
+    names = [f.filename or "?" for f in files or []]
+
+    def reject(code: int, msg: str):
+        # Log why (the access log only shows the status code) and drop the half-created upload directory.
+        log.warning("rejected upload %s (%s): %s", job.id, ", ".join(names) or arxiv_id or "-", msg)
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise HTTPException(code, msg)
+
     aid = None
     arxiv_src = None
     if arxiv_id and arxiv_id.strip():
         try:
             aid = normalize_arxiv_id(arxiv_id)
         except SourceError as e:
-            raise HTTPException(400, str(e))
+            reject(400, str(e))
         arxiv_src = aid
     elif files:
         total = 0
@@ -142,16 +159,16 @@ async def analyze(files: list[UploadFile] | None = File(default=None), arxiv_id:
             data = await f.read()
             total += len(data)
             if total > MAX_UPLOAD:
-                raise HTTPException(413, "上传文件过大（上限 60MB）")
+                reject(413, "上传文件过大（上限 60MB）")
             try:
                 extract_bytes(data, f.filename or "upload.tex", root)
             except SourceError as e:
-                raise HTTPException(400, str(e))
+                reject(400, str(e))
         root = flatten_single_subdir(root)
         if not any(root.rglob("*.tex")):
-            raise HTTPException(400, "没有找到 .tex 文件")
+            reject(400, "没有找到 .tex 文件（请上传 .tex 源文件，或包含源文件的 .zip / .tar.gz；不支持 PDF）")
     else:
-        raise HTTPException(400, "请上传文件或填写 arXiv 编号")
+        reject(400, "请上传文件或填写 arXiv 编号")
     if review_max is not None:
         review_max = max(0, min(review_max, 80))
     JOBS[job.id] = job

@@ -28,7 +28,7 @@ function pickMainTarget(report: Report, idx: ReturnType<typeof buildIndex>): str
     }
     return seen.size;
   };
-  for (const kind of ["theorem", "proposition", "lemma"]) {
+  for (const kind of ["theorem", "proposition", "lemma", "assertion", "section"]) {
     const c = report.nodes.filter((n) => n.kind === kind);
     if (c.length) return c.map((n) => [n.id, score(n.id)] as const).sort((a, b) => b[1] - a[1])[0][0];
   }

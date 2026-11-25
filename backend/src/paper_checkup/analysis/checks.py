@@ -8,7 +8,7 @@ from collections import defaultdict
 from ..latex.preamble import PROVABLE_KINDS
 from ..latex.structure import ParsedPaper
 from ..models import Edge, Node, Risk, Symbol
-from .graph import GraphBuilder, loc_of, sentence_around, strongly_connected_components
+from .graph import STRUCT_KINDS, GraphBuilder, loc_of, sentence_around, strongly_connected_components
 
 GAP_PHRASES = [
     r"clearly", r"obviously", r"evidently", r"trivially", r"it is (?:easy|straightforward|not hard|not difficult|routine) to (?:see|check|verify|show)",
@@ -19,6 +19,17 @@ GAP_PHRASES = [
     r"(?:direct|simple|easy) (?:calculation|computation)", r"we omit the (?:proof|details)",
 ]
 _GAP_RE = re.compile(r"\b(?:" + "|".join(GAP_PHRASES) + r")\b", re.I)
+
+# Numeric cross-check (structure mode): a metric next to a number, e.g. "BLEU score of $41.0$", "28.4 BLEU".
+_METRIC_RE = re.compile(
+    r"\b(BLEU|ROUGE(?:-[12L])?|METEOR|chrF|F1|F-?(?:score|measure)|accuracy|precision|recall|perplexit(?:y|ies)|PPL|"
+    r"error\s+rate|WER|CER|AUC|mAP|top-?[15](?:\s+accuracy)?|exact\s+match|FID|PSNR|SSIM|RMSE|MAE|MSE|"
+    r"speed-?up|throughput|latency|FLOPs?|parameters|params)\b", re.I)
+# Not part of a name such as "top-1", "ResNet-50", "ImageNet-1K", nor a sub/superscript.
+_VALUE_RE = re.compile(r"(?<![\w.\\^_{-])(\d+\.\d+|\d+)(?:\s*(\\?%))?(?![\w.])")
+_STOP = set("""the and for with that this from our are was were has have been than which these those such into over
+under after before about also more less most best new using used use based model models task tasks score scores
+results result achieves achieve achieved reach reaches reported report previous previously state art single""".split())
 
 
 class Checker:
@@ -46,6 +57,9 @@ class Checker:
         self.unowned_proofs()
         self.symbol_flags()
         self.gap_phrases()
+        self.numeric_candidates: list[dict] = []
+        if getattr(self.gb, "mode", "theorem") == "structure":
+            self.numeric_consistency()
         return self.risks
 
     # ------------------------------------------------------------------
@@ -69,9 +83,13 @@ class Checker:
                      loc=loc_of(self.p, off, off + 1), status="flagged")
 
     def cycles(self):
-        ids = [n for n in self.nodes]
+        # Sections and floats point at each other freely ("see Table 2" / a caption pointing back); a cycle among
+        # them is not circular reasoning, so only theorem-like items are checked.
+        ids = [n for n in self.nodes if self.nodes[n].kind not in STRUCT_KINDS]
+        idset = set(ids)
         for kinds, sev, label in ((("explicit",), "high", "显式"), (("explicit", "inferred"), "medium", "含推断")):
-            pairs = [(e.source, e.target) for e in self.edges if e.kind in kinds and e.via not in ("contained",)]
+            pairs = [(e.source, e.target) for e in self.edges if e.kind in kinds and e.via not in ("contained",)
+                     and e.source in idset and e.target in idset]
             for comp in strongly_connected_components(ids, pairs):
                 if len(comp) < 2:
                     continue
@@ -173,6 +191,88 @@ class Checker:
                     self.gap_hints[nid].append({
                         "phrase": m.group(0), "loc": loc_of(self.p, off, off + len(m.group(0))).model_dump(),
                         "sentence": sentence_around(self.p.text, off, off + len(m.group(0)))})
+
+    def numeric_consistency(self):
+        """The same metric reported with different values in comparable contexts (abstract / introduction /
+        conclusion vs. the rest of the paper). Pairing is heuristic, so these are flagged as candidates (low) for
+        the LLM stage to confirm or dismiss."""
+        p, text, gb = self.p, self.p.text, self.gb
+        skip = [(f.env.begin, f.env.end) for f in p.floats] + [(a, z) for a, z, _, _ in p.eq_lines]
+        tables = " ".join(text[f.env.begin:f.env.end] for f in p.floats if f.kind == "table")
+        top = [n for n in self.nodes.values() if n.kind == "section" and (n.env in ("section", "chapter"))]
+        intro = top[0].id if top else None
+        concl = next((n.id for n in reversed(top) if re.match(r"(?i)\s*(conclusions?|discussion|summary)", n.title or "")), None)
+        headline_units = {"abstract", intro, concl} - {None}
+
+        mentions = []
+        for a, z, nid in gb.unit_spans:
+            node = self.nodes.get(nid)
+            if node is None or node.kind != "section":
+                continue
+            own_end = min([x for x, _, m in gb.unit_spans if x > a and self.nodes.get(m) and self.nodes[m].kind == "section"] + [z])
+            for m in _VALUE_RE.finditer(text, a, own_end):
+                off = m.start()
+                if any(x <= off < y for x, y in skip):
+                    continue
+                raw = m.group(1)
+                if "." not in raw and not m.group(2) and (len(raw) == 4 and raw[:2] in ("19", "20")):
+                    continue   # a year
+                before = text[max(a, off - 12):off]
+                if re.search(r"(?i)(table|fig\.?|figure|section|sec\.|eq\.?|equation|appendix|layer|step|\\cite\w*\{[^}]*)\s*~?\(?$", before):
+                    continue
+                sent = sentence_around(text, off, m.end(), limit=320)
+                win_lo, win_hi = max(a, off - 60), min(own_end, m.end() + 40)
+                metric = None
+                best = 10 ** 9
+                for mm in _METRIC_RE.finditer(text, win_lo, win_hi):
+                    d = abs(mm.start() - off)
+                    if d < best:
+                        best, metric = d, mm.group(1)
+                if metric is None:
+                    continue
+                words = re.findall(r"[A-Za-z][A-Za-z-]{2,}", re.sub(r"\\[A-Za-z]+", " ", sent))
+                toks = {w.lower() for w in words} - _STOP - {metric.lower()}
+                ents = {w.lower() for w in words if ("-" in w and any(c.isupper() for c in w)) or (w.isupper() and len(w) >= 3)}
+                ents -= {metric.lower()}
+                mentions.append({"value": float(raw), "raw": raw + ("%" if m.group(2) else ""), "metric": metric.lower(),
+                                 "off": off, "end": m.end(), "unit": nid, "sent": sent, "toks": toks, "ents": ents,
+                                 "headline": nid in headline_units})
+        seen = set()
+        for b in mentions:
+            same = [a for a in mentions if a["headline"] and a["unit"] != b["unit"] and a["metric"] == b["metric"]
+                    and a["ents"] & b["ents"]]
+            scored = []
+            for a in same:
+                sim = len(a["toks"] & b["toks"]) / max(1, min(len(a["toks"]), len(b["toks"])))
+                if sim >= 0.3:
+                    scored.append((sim, a))
+            if not scored or any(abs(a["value"] - b["value"]) < 1e-9 for _, a in scored):
+                continue
+            sim, a = max(scored, key=lambda t: t[0])
+            # Another number in A's sentence with B's value -> A talks about several quantities; skip.
+            if any(abs(float(x) - b["value"]) < 1e-9 for x in re.findall(r"\d+(?:\.\d+)?", a["sent"])):
+                continue
+            key = tuple(sorted([(a["raw"], a["unit"]), (b["raw"], b["unit"])])) + (b["metric"],)
+            if key in seen:
+                continue
+            seen.add(key)
+            in_tab = {v: bool(re.search(r"(?<![\d.])" + re.escape(v.rstrip("%")) + r"(?![\d])", tables)) for v in (a["raw"], b["raw"])}
+            tab_note = ""
+            if any(in_tab.values()):
+                tab_note = "表格中出现了 " + "、".join(v for v, ok in in_tab.items() if ok) + \
+                           ("，没有出现 " + "、".join(v for v, ok in in_tab.items() if not ok) if not all(in_tab.values()) else "") + "。"
+            la, lb = loc_of(p, a["off"], a["end"]), loc_of(p, b["off"], b["end"])
+            metric = b["metric"].upper() if b["metric"] in ("bleu", "wer", "cer", "auc", "fid", "ppl", "f1", "mse", "mae", "rmse") else b["metric"]
+            r = self.add(category="numeric", severity="low",
+                         title=f"{metric} 数值前后不一致：{a['raw']} 与 {b['raw']}",
+                         description=f"相近的语境下，同一指标给出了不同的数值：{self._name(a['unit'])}（{la.file}:{la.line_start}）写的是 "
+                                     f"{a['raw']}，{self._name(b['unit'])}（{lb.file}:{lb.line_start}）写的是 {b['raw']}。{tab_note}"
+                                     f"程序按上下文相似度配对，也可能是两个不同的量（如不同模型规模或设置）；大模型阶段会逐条核对。\n"
+                                     f"· {a['sent']}\n· {b['sent']}",
+                         node_ids=[a["unit"], b["unit"]], loc=lb, quote=b["sent"], status="flagged")
+            self.numeric_candidates.append({"risk_id": r.id, "metric": metric, "a": a["raw"], "b": b["raw"],
+                                            "a_loc": la, "b_loc": lb, "a_sent": a["sent"], "b_sent": b["sent"],
+                                            "a_unit": a["unit"], "b_unit": b["unit"], "table_note": tab_note})
 
     def _name(self, nid: str) -> str:
         n = self.nodes[nid]

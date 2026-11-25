@@ -28,6 +28,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .pricing import Budget, cost_usd
+
 log = logging.getLogger("paper_checkup.llm")
 
 DEFAULT_MODELS = {"openai": "gpt-6.2-astra", "anthropic": "claude-opus-5-5", "deepseek": "deepseek-v4-pro",
@@ -51,7 +53,12 @@ ROLE_EFFORT = {"extract": "medium", "author": "high", "reviewer": "high"}
 
 
 class LLMError(RuntimeError):
-    pass
+    # Token usage of a call that was billed but failed (truncated / unparsable output), for cost accounting.
+    usage: dict | None = None
+
+
+class BudgetExceeded(LLMError):
+    """Raised instead of making a call once the analysis or daily spend limit is reached."""
 
 
 class LLMRefusal(LLMError):
@@ -68,6 +75,8 @@ class LLMStats:
     cache_read_tokens: int = 0
     reasoning_tokens: int = 0
     cache_write_tokens: int = 0
+    cost_usd: float = 0.0          # spend of the real calls made by this analysis (cached responses are free)
+    unpriced: set[str] = field(default_factory=set)
 
     def add(self, usage: dict):
         self.reasoning_tokens += int(usage.get("reasoning_tokens") or 0)
@@ -206,10 +215,6 @@ class OpenAICompatProvider(BaseProvider):
                 raise
         choice = resp.choices[0]
         content = choice.message.content or ""
-        if choice.finish_reason == "length":
-            raise LLMError("输出被截断（达到输出上限；推理 token 也计入上限），请调大 LLM_MAX_TOKENS")
-        if getattr(choice.message, "refusal", None):
-            raise LLMRefusal(f"模型拒绝了该请求：{choice.message.refusal}")
         usage = {}
         if resp.usage:
             usage = {"input_tokens": resp.usage.prompt_tokens, "output_tokens": resp.usage.completion_tokens}
@@ -221,7 +226,19 @@ class OpenAICompatProvider(BaseProvider):
             cdetails = getattr(resp.usage, "completion_tokens_details", None)
             if cdetails is not None and getattr(cdetails, "reasoning_tokens", None):
                 usage["reasoning_tokens"] = cdetails.reasoning_tokens
-        return extract_json(content), usage
+        try:
+            if choice.finish_reason == "length":
+                raise LLMError("输出被截断（达到输出上限；推理 token 也计入上限），请调大 LLM_MAX_TOKENS")
+            if getattr(choice.message, "refusal", None):
+                raise LLMRefusal(f"模型拒绝了该请求：{choice.message.refusal}")
+            return extract_json(content), usage
+        except LLMError as e:
+            e.usage = usage
+            raise
+        except json.JSONDecodeError as e:
+            err = LLMError(f"模型输出不是合法的 JSON：{e}")
+            err.usage = usage
+            raise err from e
 
 
 class AnthropicProvider(BaseProvider):
@@ -340,8 +357,9 @@ def _anthropic_profile_exists() -> bool:
 class LLMClient:
     """Role-aware facade used by the pipeline stages."""
 
-    def __init__(self, config: LLMConfig, use_cache: bool = True):
+    def __init__(self, config: LLMConfig, use_cache: bool = True, budget: Budget | None = None):
         self.config = config
+        self.budget = budget
         self.stats = LLMStats()
         self.sem = asyncio.Semaphore(max(1, config.concurrency))
         self.use_cache = use_cache and config.cache_dir is not None
@@ -365,11 +383,27 @@ class LLMClient:
                 except Exception:  # pragma: no cover - best effort
                     pass
 
+    def _charge(self, spec: str, usage: dict | None) -> float:
+        if not usage:
+            return 0.0
+        from .pricing import price_for
+        if not price_for(spec)[1] and spec not in self.stats.unpriced:
+            self.stats.unpriced.add(spec)
+            log.warning("没有 %s 的价格，按已知最贵的价格估算花费", spec)
+        c = cost_usd(spec, usage)
+        self.stats.cost_usd += c
+        if self.budget is not None:
+            self.budget.add(c)
+        return c
+
     def _cache_path(self, key: str) -> Path:
         return self.config.cache_dir / key[:2] / f"{key}.json"
 
     async def json(self, role: str, system: str, blocks: list[str], schema: dict, schema_name: str,
-                   max_tokens: int | None = None, attempts: int = 2, use_disk_cache: bool = True) -> dict:
+                   max_tokens: int | None = None, attempts: int = 2, use_disk_cache: bool = True,
+                   budget_reserve: float = 0.1) -> dict:
+        """One structured call. `budget_reserve` is the fraction of the budget this call may not dip into
+        (kept for the final meta-review, which passes 0)."""
         prov = self.provider_for(role)
         # Reasoning/thinking tokens count against the output cap, so never go below the configured cap.
         max_tokens = max(max_tokens or 0, self.config.max_tokens)
@@ -389,21 +423,29 @@ class LLMClient:
         last_err: Exception | None = None
         for attempt in range(attempts):
             async with self.sem:
+                if self.budget is not None:
+                    why = self.budget.refusal(budget_reserve)
+                    if why:
+                        self.budget.exhausted = self.budget.exhausted or why
+                        raise BudgetExceeded(why)
                 try:
                     self.stats.calls += 1
                     data, usage = await prov.complete_json(system, blocks, schema, schema_name, max_tokens, role)
                     self.stats.add(usage)
+                    cost = self._charge(prov.spec, usage)
                     if use_cache:
                         cp = self._cache_path(key)
                         cp.parent.mkdir(parents=True, exist_ok=True)
                         cp.write_text(json.dumps({"spec": prov.spec, "schema": schema_name, "response": data,
-                                                  "usage": usage}, ensure_ascii=False))
+                                                  "usage": usage, "cost_usd": round(cost, 6)}, ensure_ascii=False))
                     return data
-                except LLMRefusal:
+                except LLMRefusal as e:
                     self.stats.failures += 1
+                    self._charge(prov.spec, e.usage)
                     raise
                 except (LLMError, json.JSONDecodeError) as e:
                     last_err = e
+                    self._charge(prov.spec, getattr(e, "usage", None))
                     log.warning("LLM 输出解析失败（第 %d 次）：%s", attempt + 1, e)
                 except Exception as e:  # network / API errors already retried by the SDK
                     self.stats.failures += 1

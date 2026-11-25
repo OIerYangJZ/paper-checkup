@@ -1,6 +1,6 @@
 import { CornerDownRight, Crosshair, FileCode2, GitBranch, Info, MousePointerClick, Quote, Route, ShieldAlert } from "lucide-react";
 import { useMemo } from "react";
-import { EDGE_KIND_LABEL, KIND_COLOR, KIND_LABEL, PROOF_HOW_LABEL, PROOF_SOURCE_LABEL, PROVABLE, VIA_LABEL, nodeName } from "../lib/labels";
+import { EDGE_KIND_LABEL, KIND_COLOR, KIND_LABEL, PROOF_HOW_LABEL, PROOF_SOURCE_LABEL, PROVABLE, STRUCT_KINDS, VIA_LABEL, nodeName } from "../lib/labels";
 import type { PaperEdge } from "../types";
 import { Collapsible, Empty, KindChip, LocLink, NodeLink, Tag } from "./common";
 import { usePaper } from "./context";
@@ -61,6 +61,10 @@ export function NodeDetail({ id }: { id: string | null }) {
   ];
   const symbols = report.symbols.filter((s) => n.symbols_used.includes(s.id));
   const parent = n.parent ? index.nodes.get(n.parent) : undefined;
+  const structural = STRUCT_KINDS.has(n.kind);
+  const reviewName = n.kind === "assertion" ? "论断审查" : "审稿对抗";
+  const stmtTitle =
+    n.kind === "section" ? "正文（本节自身的文字，不含小节）" : n.kind === "assertion" ? "论断原文" : ["figure", "table", "pseudocode", "listing"].includes(n.kind) ? "题注" : "陈述";
 
   return (
     <div className="node-detail" style={{ ["--stmt-color" as string]: KIND_COLOR[n.kind] ?? "#94a3b8" }}>
@@ -88,11 +92,13 @@ export function NodeDetail({ id }: { id: string | null }) {
         {n.review ? (
           <Tag tone={n.review.status === "passed" ? "green" : n.review.status === "issues" ? "red" : "grey"}>
             {n.review.status === "passed"
-              ? `审稿对抗：通过（${n.review.challenges ?? 0} 条质疑均已解决${n.review.minor ? `，含 ${n.review.minor} 个次要问题` : ""}）`
+              ? `${reviewName}：通过（${n.review.challenges ?? 0} 条质疑均已解决${n.review.minor ? `，含 ${n.review.minor} 个次要问题` : ""}）`
               : n.review.status === "issues"
-                ? `审稿对抗：${n.review.unresolved} 处未解决`
+                ? `${reviewName}：${n.review.unresolved} 处未解决`
                 : n.review.status === "skipped"
-                  ? "未纳入审稿对抗"
+                  ? n.review.reason === "budget"
+                    ? `因花费上限未${reviewName === "论断审查" ? "审查" : "纳入审稿对抗"}`
+                    : `未纳入${reviewName}`
                   : "审查失败"}
           </Tag>
         ) : null}
@@ -118,7 +124,19 @@ export function NodeDetail({ id }: { id: string | null }) {
         <div className="note">
           <Info size={15} />
           <span>
-            该条目位于 <NodeLink id={parent.id} /> 的证明之中。
+            {n.kind === "assertion" ? (
+              <>
+                这条论断出自 <NodeLink id={parent.id} />（由大模型从全文中提取，原文已逐字核对）。
+              </>
+            ) : structural ? (
+              <>
+                属于 <NodeLink id={parent.id} />。
+              </>
+            ) : (
+              <>
+                该条目位于 <NodeLink id={parent.id} /> 的证明之中。
+              </>
+            )}
           </span>
         </div>
       ) : null}
@@ -148,9 +166,15 @@ export function NodeDetail({ id }: { id: string | null }) {
       ) : (
         <section className="nd-section">
           <h3>
-            <Quote size={13} /> 陈述
+            <Quote size={13} /> {stmtTitle}
           </h3>
-          <Latex src={n.statement} className="statement" />
+          {n.kind === "section" ? (
+            <div className="unit-text">
+              <Latex src={n.statement || "（本节没有自身的文字）"} className="statement" />
+            </div>
+          ) : (
+            <Latex src={n.statement || "（无题注）"} className="statement" />
+          )}
         </section>
       )}
 
@@ -188,7 +212,7 @@ export function NodeDetail({ id }: { id: string | null }) {
 
       <section className="nd-section">
         <h3>
-          <GitBranch size={13} /> 依赖（前置条目）
+          <GitBranch size={13} /> {n.kind === "assertion" ? "证据与依赖" : "依赖（前置条目）"}
         </h3>
         {groups.every(([, es]) => !es.length) ? <div className="muted">没有发现依赖。</div> : null}
         {groups.map(([title, es]) =>

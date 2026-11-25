@@ -18,6 +18,13 @@ export const KIND_LABEL: Record<string, string> = {
   other: "其他",
   equation: "公式",
   external: "外部",
+  // structure mode (papers without theorem-like environments)
+  section: "章节",
+  figure: "图",
+  table: "表",
+  listing: "代码",
+  pseudocode: "算法（浮动体）",
+  assertion: "论断",
 };
 
 export const KIND_COLOR: Record<string, string> = {
@@ -38,7 +45,16 @@ export const KIND_COLOR: Record<string, string> = {
   other: "#64748b",
   equation: "#475569",
   external: "#94a3b8",
+  section: "#334155",
+  figure: "#0d9488",
+  table: "#0369a1",
+  listing: "#64748b",
+  pseudocode: "#0e7490",
+  assertion: "#c2410c",
 };
+
+/** Kinds that structure the paper rather than state a result (structure mode). */
+export const STRUCT_KINDS = new Set(["section", "figure", "table", "pseudocode", "listing", "assertion"]);
 
 export const PROVABLE = new Set(["theorem", "lemma", "proposition", "corollary", "claim", "fact"]);
 
@@ -51,6 +67,11 @@ export const CATEGORY_LABEL: Record<string, string> = {
   cycle: "循环依赖",
   reference: "引用",
   structure: "结构",
+  numeric: "数字不一致",
+  overclaim: "论断过度",
+  comparison: "比较不对等",
+  attribution: "归因缺乏对照",
+  reproducibility: "可复现性",
   other: "其他",
 };
 
@@ -107,6 +128,8 @@ export function nodeName(n: PaperNode | undefined): string {
   if (!n) return "?";
   if (n.kind === "external") return n.title || n.display;
   if (n.kind === "equation") return `公式 (${n.number ?? "?"})`;
+  if (n.kind === "assertion") return `论断 ${n.number ?? ""}`.trim();
+  if (n.kind === "section" && !n.number) return n.title || n.display;
   return n.number ? `${n.display} ${n.number}` : n.display;
 }
 

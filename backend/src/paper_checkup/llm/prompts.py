@@ -117,8 +117,13 @@ def symbol_meaning_system(lang: str) -> str:
 SEV = enum("high", "medium", "low", "info")
 
 
-def shared_system(lang: str) -> str:
-    """One rule book for every author / reviewer / editor call, so they share one cached prefix."""
+def shared_system(lang: str, mode: str = "theorem") -> str:
+    """One rule book for every author / reviewer / editor call, so they share one cached prefix.
+
+    mode="structure" (papers without theorem-like environments): claims are checked against the paper's own
+    evidence instead of proofs step by step."""
+    if mode == "structure":
+        return structure_system(lang)
     return f"""你在参与一次论文“审稿体检”：作者智能体为论证给出依据，审稿人智能体逐条质疑，主审复核整理。具体扮演哪个角色、做什么，写在用户消息中论文全文之后。
 
 用户消息的第一部分是论文全文：行首 L<n>| 是源文件行号（“### 文件 …”标出换文件），【id · 名称 开始/结束】标出定理类条目及其证明的边界，正文中的 \\ref 已替换为编号并附〔id〕。
@@ -297,3 +302,112 @@ def external_merge_system(lang: str) -> str:
     return f"""下面是从一篇论文中识别出的“外部知识”（论文使用但未证明、也未引用文献的标准结果）。请把指同一个结果的条目归为一组（不同叫法、中英文、括号补充说明都算同一个），
 给出通行的规范名称（canonical_name）。若某组只是初等的运算性质或常识（不需要专门知识），keep=false；否则 keep=true。每个 id 恰好出现在一个组里。
 {lang_line(lang)}"""
+
+
+# ---------------------------------------------------------------------------
+# Structure mode: papers without theorem-like environments (empirical / ML / applied papers)
+# ---------------------------------------------------------------------------
+
+def structure_system(lang: str) -> str:
+    return f"""你在参与一次论文“审稿体检”：这篇论文没有定理类环境，体检对象是论文提出的核心论断。作者智能体为论断给出论文中的证据，审稿人智能体逐条质疑，主审复核整理。具体扮演哪个角色、做什么，写在用户消息中论文全文之后。
+
+用户消息的第一部分是论文全文：行首 L<n>| 是源文件行号（“### 文件 …”标出换文件）；【sec-… · Section …】标出章节开头，【tab-… / fig-… / alg-… 开始/结束】标出图表，【eq-… · 公式 (n)】标出编号公式；正文中的 \\ref 已替换为编号并附〔id〕。表格保留原始 LaTeX，数字可以直接读取。
+
+所有角色共同遵守：
+1. 善意阅读：按该领域称职读者的理解来读。领域通行的做法（使用标准基准与指标、报告开发集上选出的模型、引用前人报告的基线数字）本身不是问题，除非论文的说法超出了它。
+2. 先检索全文，再下结论：表格、图注、附录、脚注、实验设置与训练细节段落都是论文的证据。已在别处说明的，不是问题。
+3. 引用原文时逐字复制（可含 LaTeX），并给出行号；条目用 id 指代（如 tab-2、sec-23、eq-1）。不得编造论文中没有的内容或数字。
+4. 严重程度标准（统一使用）：
+   - high：核心论断与论文自己的证据矛盾（如摘要 / 结论中的数字与表格或正文不一致、所称的提升在表中不存在），或核心论断完全没有证据；
+   - medium：证据弱于论断——比较不对等（数据、评测、规模或开销不可比）、把提升归因于某个设计却没有对照或消融、只在单一设置下验证却作一般性表述、判断论断所需的关键实验细节缺失；
+   - low：局部的数字、记号或表述错误，不影响任何核心论断；
+   - info：表述可以更严谨，但称职读者不会被误导。
+   定为 high 之前先自问：“受影响的是核心论断本身吗？论文自己的哪条证据与之矛盾？”
+5. 错误类型（error_type）决定严重程度的上限：
+   - typo_or_notation：笔误、记号不一致、上下文能明确看出正确数字且不影响论断的数字笔误——最高 low；
+   - pseudocode_or_typesetting：伪代码、算法、表格排版中的错误，且意图从上下文明显可见——最高 medium；
+   - degenerate_or_convention：只涉及领域通行约定——最高 info；
+   - logic：论断与证据的关系本身有问题（包括无法判断哪个才是真实结果的数字矛盾）——按标准定级。
+6. 只评价论文写出的论断是否被论文自己的证据支撑。不要提出文风、写作动机、未来工作之类的意见；不要因为“还可以多做一个实验”就提质疑——只有当某个论断确实依赖那项证据时才指出它缺失。
+{lang_line(lang)}"""
+
+
+CLAIMS_SCHEMA = obj({"claims": arr(obj({
+    "line": I,
+    "quote": S,
+    "kind": enum("result", "comparison", "efficiency", "generalization", "mechanism", "other"),
+    "importance": enum("core", "supporting"),
+    "summary": S,
+    "evidence_ids": arr(S),
+}))})
+
+CLAIMS_TASK = """## 任务：列出论文的核心论断
+找出论文提出的、需要证据支撑的论断（最多 12 条），优先摘要、引言、结论中的总括性论断，以及结果章节中带数字的结论。不要列出：对前人工作的介绍、方法的定义与描述（除非它断言了某种效果）、致谢与未来工作。
+对每条论断：
+- line：所在行号；quote：论断在原文中的一句（逐字复制，20～300 个字符，可含 LaTeX；必须能在原文中原样找到）；
+- kind：result（结果）、comparison（与他人比较）、efficiency（开销 / 速度）、generalization（推广到其他任务或设置）、mechanism（某个设计带来了某种效果）、other；
+- importance：core（论文的主要贡献所依赖的论断）或 supporting；
+- summary：不超过 30 字的概括；
+- evidence_ids：论文为它提供证据的表、图、章节或公式的 id（来自全文中的【…】标记，如 tab-2、sec-23）；论文没有给出证据时返回空数组。
+同一论断在摘要和正文中重复出现时只列一次（取摘要或引言中的那一句）。"""
+
+CLAIM_AUTHOR_ROLE = """## 你的角色：论文作者
+你熟悉全文。为论断给出论文中的证据：表格中的哪一行哪一列、哪张图、哪段实验设置或分析支撑了它，比较的双方是否可比。
+辩护时可以引用全文任何位置的内容。只有当问题在称职读者的理解下确实存在时才承认（concede）；
+若问题真实但只是笔误或不影响论断的局部疏漏，回答 minor 并说明为何不影响论断；若论文已有依据，回答 defend 并给出原文。"""
+
+CLAIM_REVIEWER_ROLE = """## 你的角色：审稿人
+严格但公正，只评价这个论断是否被论文自己的证据支撑。重点核对：
+- numeric：论断中的每个数字是否与表格 / 正文其他位置一致（逐一对照，不一致时写出两处原文与行号）；
+- overclaim：论断的措辞（如 state of the art、generalizes well、significantly faster）是否超出了证据覆盖的设置；
+- comparison：比较是否对等（相同数据与评测、可比的规模或开销），对比对象是否就是论断所指的对象；
+- attribution：把效果归因于某个设计时，是否有对照或消融支持；
+- reproducibility：判断该论断所需的关键设置（数据划分、训练开销的计算方式、选择模型的依据等）是否写明。
+每个质疑必须指向原文中具体的一句（逐字引用并给出行号），具体说明缺了什么，并按统一标准定级。没有问题时返回空列表。"""
+
+CLAIM_AUTHOR_TASK = """请说明论文用哪些证据支撑上面这个论断，把证据链分解为 1～6 步。对每一步：
+- step_id：S1、S2…；line：证据所在行号；quote：证据原文（逐字，如表格中的一行、结果段落中的一句）；
+- claim：这一步说明了什么；justification：为何足以支撑论断；uses：用到的 tab- / fig- / sec- / eq- id；
+- hypotheses_check：若论断涉及比较，说明比较是否对等（数据、评测方式、模型规模或训练开销）；不涉及比较时写“无”。"""
+
+CLAIM_CHALLENGES_SCHEMA = obj({"challenges": arr(obj({
+    "challenge_id": S,
+    "step_id": nullable(S),
+    "category": enum("numeric", "overclaim", "comparison", "attribution", "reproducibility", "other"),
+    "line": I,
+    "quote": S,
+    "concern": S,
+    "affects": enum("statement", "proof"),
+    "error_type": enum("logic", "pseudocode_or_typesetting", "typo_or_notation", "degenerate_or_convention"),
+    "severity": SEV,
+}))})
+
+CLAIM_REVIEWER_TASK = """以上是作者给出的证据链。请逐条审查（也包括作者没有列出的证据），只对确有疑问之处提出质疑。
+对每个质疑：challenge_id（C1、C2…）、对应的 step_id（若有）、category、line、quote（逐字引用原文）、concern（具体问题；数字不一致时写出两处的数字与行号）、
+affects（statement：论断本身不成立或需要收窄；proof：只是证据的呈现有缺陷，论断本身可以成立）、error_type、按统一标准且不超过该类型上限的 severity。提出之前先确认全文其他位置没有处理这个问题。"""
+
+CLAIM_REBUTTAL_TASK = """审稿人对这个论断提出了以上质疑。请逐条回应：
+- stance：defend（论文中已有充分依据，给出原文）、minor（问题真实但只是笔误 / 不影响论断）、partial（部分成立）、concede（问题确实存在）；
+- response：你的理由；evidence_quote：论文中支持你的原文（逐字，可来自全文任何位置；没有就填空字符串）。"""
+
+CLAIM_VERDICT_TASK = """作者已经对你的质疑逐条回应。请逐条裁决：
+- resolved：作者给出的依据确实存在于论文中、足以支撑论断；
+- minor：问题真实，但只是笔误或不影响论断的局部疏漏；
+- unresolved：问题实质存在（作者承认，或依据不充分、与原文不符）。
+对每一条给出 title（不超过 30 字，概括问题）、按统一标准重新确认的 severity（看过作者回应后可以调整），以及 final_comment（unresolved / minor 时说明读者需要自己核查什么；resolved 时一句话说明为何接受）。"""
+
+NUMERIC_SCHEMA = obj({"items": arr(obj({
+    "id": S,
+    "verdict": enum("inconsistent", "different", "unclear"),
+    "severity": SEV,
+    "title": S,
+    "comment": S,
+}))})
+
+NUMERIC_TASK = """## 你的角色：审稿人（数字核对）
+程序在论文中找到了下面这些“同一指标、语境相近、数值不同”的候选（配对是启发式的）。请对照全文逐条核对：
+- inconsistent：两处说的是同一个量（同一模型、数据集、指标与设置），数值却不同；
+- different：其实是不同的量（不同模型规模、数据集、设置或统计口径），不是问题；
+- unclear：无法从论文判断。
+对每一条给出 verdict、按统一标准的 severity（同一个量在摘要 / 结论与表格 / 正文中不一致、读者无法确定哪个是真实结果：至少 medium；涉及论文的核心论断：high；different 时填 info）、
+title（不超过 30 字）以及 comment（说明两处分别指什么、表格中是哪个数字、读者应以哪个为准）。"""

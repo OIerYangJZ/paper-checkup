@@ -168,6 +168,9 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
     ("x-denotes", re.compile(r"((?:⟦\d+⟧\s*(?:,|and)?\s*)+)\s+(?:denotes|denote|will\s+denote|stands\s+for|is\s+defined|are\s+defined|is\s+called|are\s+called|is\s+the\s+set|is\s+given\s+by|refers\s+to)\b", re.I)),
     ("define", re.compile(r"\b(?:we\s+)?(?:define|defined|defines|introduce)\s+(?:the\s+[\w-]+\s+(?:[\w-]+\s+)?)?((?:⟦\d+⟧\s*(?:,|and)?\s*)+)", re.I)),
     ("where", re.compile(r"\b(?:where|here)\s+((?:⟦\d+⟧\s*(?:,|and)?\s*)+)\s*(?:is|are|denotes|denote|stands)\b", re.I)),
+    # Empirical / ML prose: "queries and keys of dimension $d_k$", "referred to as $h$".
+    ("dimension", re.compile(r"\b(?:of|with|has|have)\s+(?:dimension|dimensionality|size)\s+((?:⟦\d+⟧\s*(?:,|and)?\s*)+)", re.I)),
+    ("referred-as", re.compile(r"\b(?:referred\s+to\s+as|denoted\s+as)\s+((?:⟦\d+⟧\s*(?:,|and)?\s*)+)", re.I)),
 ]
 _TERM_TRIGGER = re.compile(r"(?:called|we\s+say|is\s+said\s+to\s+be|are\s+said\s+to\s+be|we\s+call|refer\s+to|termed|known\s+as|define)\s*(?:an?\s+|the\s+)?[^.]{0,40}$", re.I)
 _EMPH_RE = re.compile(r"\\(?:emph|textit|textbf|textsl|defn|term|dfn|textsc)\s*\{([^{}]{2,80})\}"
@@ -407,6 +410,11 @@ class SymbolExtractor:
             first_section_end = tech_sections[0].end
         block_by_index = {b.index: b for b in self.p.blocks}
         used_by_node: dict[str, set[str]] = defaultdict(set)
+        # Structure mode: offsets outside theorem-like blocks belong to sections / floats / equations.
+        unit_of = self.gb.unit_at if getattr(self.gb, "mode", "theorem") == "structure" else (lambda _o: None)
+
+        def node_at(off: int, bi: int | None) -> str | None:
+            return block_by_index[bi].id if bi is not None else unit_of(off)
 
         sid = 0
         first_offset: dict[str, int] = {}
@@ -429,7 +437,7 @@ class SymbolExtractor:
             defs_models = []
             for (off, end, scope, pattern, bi) in sorted(c.defs)[:6]:
                 defs_models.append(SymbolDef(
-                    loc=loc_of(self.p, off, end), node_id=block_by_index[bi].id if bi is not None else None,
+                    loc=loc_of(self.p, off, end), node_id=node_at(off, bi),
                     context=sentence_around(self.text, off, end, limit=220), scope=scope, pattern=pattern))
             if c.kind == "macro":
                 md = self.p.info.macros.get(c.key)
@@ -440,13 +448,17 @@ class SymbolExtractor:
             sym = Symbol(id=f"sym-{sid}", latex=c.latex, kind=c.kind, macro_expansion=c.macro_expansion,
                          definitions=defs_models, uses=len(occ))
             defining_block = next((d[4] for d in sorted(c.defs) if d[2] == "definition"), None)
-            if defining_block is not None:
-                sym.defined_in_node = block_by_index[defining_block].id
+            src_id = block_by_index[defining_block].id if defining_block is not None else None
+            if src_id is None and c.kind == "symbol":
+                first_prose = next((d for d in sorted(c.defs) if d[2] == "prose" and d[3] != "assign"), None)
+                src_id = unit_of(first_prose[0]) if first_prose else None
+            if src_id is not None:
+                sym.defined_in_node = src_id
             if occ:
                 fu = occ[0]
                 sym.first_use = loc_of(self.p, fu, fu + 1)
                 ctx, bi = self.context_of(fu)
-                sym.first_use_node = block_by_index[bi].id if bi is not None else None
+                sym.first_use_node = node_at(fu, bi)
                 sym.first_use_context = sentence_around(self.text, fu, fu + 1, limit=200)
             # flags (algorithmic ':=' assignments alone are not treated as definitions for flagging)
             flag_defs = [d for d in global_defs if d[3] != "assign" or d[2] == "definition"]
@@ -474,14 +486,15 @@ class SymbolExtractor:
             occ_nodes: dict[str, tuple[int, str]] = {}
             for o in occ:
                 ctx, bi = self.context_of(o)
-                if bi is None:
+                nid = node_at(o, bi)
+                if nid is None or nid not in nodes:
                     continue
-                nid = block_by_index[bi].id
                 used_by_node[nid].add(sym.id)
                 if nid not in occ_nodes:
-                    occ_nodes[nid] = (o, "statement" if ctx in ("statement", "definition") else "proof")
-            if defining_block is not None:
-                src = block_by_index[defining_block].id
+                    # Text of a structure unit (section, float) is all "statement"; only proofs are "proof".
+                    occ_nodes[nid] = (o, "proof" if ctx == "proof" else "statement")
+            if src_id is not None and src_id in nodes:
+                src = src_id
                 src_order = nodes[src].order
                 for nid, (o, ctx) in occ_nodes.items():
                     if nid == src or nodes[nid].order < src_order:

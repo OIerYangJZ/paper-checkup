@@ -29,6 +29,7 @@ export interface ExternalInfo {
 
 export interface ReviewInfo {
   status: "passed" | "issues" | "error" | "skipped";
+  reason?: string; // "budget": skipped because the spend limit was reached
   steps?: number;
   challenges?: number;
   unresolved?: number;
@@ -183,6 +184,8 @@ export interface Report {
     main_file: string;
     documentclass?: string | null;
     sources_redacted?: boolean;
+    /** structure: no theorem-like environments; the paper is read by sections, figures, tables and claims */
+    mode?: "theorem" | "structure";
   };
   pipeline: {
     version: string;
@@ -194,6 +197,11 @@ export interface Report {
     llm_cached: number;
     tokens_in: number;
     tokens_out: number;
+    tokens_cached?: number;
+    tokens_reasoning?: number;
+    cost_usd?: number;
+    budget_usd?: number | null;
+    budget_note?: string | null;
     language: string;
   };
   macros: Record<string, string>;
@@ -238,5 +246,12 @@ export interface JobStatus {
 export interface Health {
   ok: boolean;
   version: string;
-  llm: { enabled: boolean; provider: string; models: Record<string, string>; reason?: string | null; requires_token?: boolean };
+  llm: {
+    enabled: boolean;
+    provider: string;
+    models: Record<string, string>;
+    reason?: string | null;
+    requires_token?: boolean;
+    budget?: { per_job: number | null; per_day: number | null; spent_today: number; day_exhausted: boolean };
+  };
 }

@@ -216,18 +216,32 @@ export function Home({
                   </div>
                 ) : null}
                 <div className="preset-stats">
-                  <div className="pstat">
-                    <b>{p.stats.nodes}</b>
-                    <span>条目</span>
-                  </div>
+                  {p.stats.nodes || !p.stats.sections ? (
+                    <div className="pstat">
+                      <b>{p.stats.nodes}</b>
+                      <span>条目</span>
+                    </div>
+                  ) : (
+                    <div className="pstat">
+                      <b>{p.stats.sections}</b>
+                      <span>章节</span>
+                    </div>
+                  )}
                   <div className="pstat">
                     <b>{p.stats.edges_explicit}</b>
                     <span>确定依赖</span>
                   </div>
-                  <div className="pstat">
-                    <b>{p.stats.edges_inferred}</b>
-                    <span>推断依赖</span>
-                  </div>
+                  {p.stats.nodes || !p.stats.sections ? (
+                    <div className="pstat">
+                      <b>{p.stats.edges_inferred}</b>
+                      <span>推断依赖</span>
+                    </div>
+                  ) : (
+                    <div className="pstat">
+                      <b>{p.stats.claims ?? 0}</b>
+                      <span>核心论断</span>
+                    </div>
+                  )}
                   <div className={`pstat ${p.stats.risks ? "risk" : ""}`}>
                     <b>{p.stats.risks}</b>
                     <span>风险点</span>

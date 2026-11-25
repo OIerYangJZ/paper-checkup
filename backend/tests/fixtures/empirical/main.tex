@@ -1,0 +1,43 @@
+\documentclass{article}
+\begin{document}
+\title{A Faster Widget Network}
+\author{A. Author}
+\maketitle
+\begin{abstract}
+We propose WidgetNet. On the ImageNet-1K benchmark, WidgetNet reaches a top-1 accuracy of 81.2\% while being 2.0 times faster than ResNet-50.
+\end{abstract}
+
+\section{Introduction}\label{sec:intro}
+Widgets are everywhere. We show in Section~\ref{sec:results} that WidgetNet is fast.
+
+\section{Method}\label{sec:method}
+Each block maps inputs of dimension $d_{in}$ to outputs of the same size, following \cite{he2016}.
+\begin{equation}\label{eq:block}
+y = \sigma(W x + b)
+\end{equation}
+Equation~\eqref{eq:block} is applied $L$ times, where $d_{in}$ stays fixed.
+
+\section{Results}\label{sec:results}
+Table~\ref{tab:main} compares WidgetNet with baselines built from the block of Section~\ref{sec:method}, with inputs of size $d_{in}$.
+On the ImageNet-1K benchmark, WidgetNet reaches a top-1 accuracy of $80.4\%$, and it runs 2.0 times faster than ResNet-50 (Figure~1).
+
+\begin{table}
+\caption{Top-1 accuracy on ImageNet-1K.}\label{tab:main}
+\begin{tabular}{lc}
+Model & Top-1 \\
+ResNet-50 & 76.1 \\
+WidgetNet & 80.4 \\
+\end{tabular}
+\end{table}
+
+\begin{figure}
+\caption{Throughput comparison.}\label{fig:speed}
+\end{figure}
+
+\section{Conclusion}
+WidgetNet is accurate and fast.
+
+\begin{thebibliography}{1}
+\bibitem{he2016} K. He et al. Deep residual learning. CVPR 2016.
+\end{thebibliography}
+\end{document}

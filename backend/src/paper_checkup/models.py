@@ -180,6 +180,7 @@ class PaperMeta(BaseModel):
     main_file: str
     documentclass: str | None = None
     sources_redacted: bool = False       # public copies omit the full LaTeX sources
+    mode: Literal["theorem", "structure"] = "theorem"   # structure: no theorem-like environments (read by section)
 
 
 class PipelineInfo(BaseModel):
@@ -194,6 +195,9 @@ class PipelineInfo(BaseModel):
     tokens_out: int = 0
     tokens_cached: int = 0
     tokens_reasoning: int = 0
+    cost_usd: float = 0.0                 # estimated spend of this analysis (token counts x list prices)
+    budget_usd: float | None = None       # per-analysis spend limit, if any
+    budget_note: str | None = None        # set when a spend limit stopped some LLM calls
     language: str = "zh"
 
 

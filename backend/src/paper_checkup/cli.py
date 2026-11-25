@@ -31,13 +31,19 @@ def _progress_printer():
     return cb
 
 
+def _budget(args):
+    from .llm.pricing import Budget
+    return Budget(per_job=args.budget) if getattr(args, "budget", None) else None
+
+
 def cmd_analyze(args):
     from .pipeline import run_pipeline
 
     t = time.time()
     rep = asyncio.run(run_pipeline(Path(args.path), paper_id=args.id, arxiv_id=args.arxiv_id,
                                    use_llm=not args.no_llm, review_max=args.review_max,
-                                   progress=_progress_printer(), use_cache=not args.no_cache))
+                                   progress=_progress_printer(), use_cache=not args.no_cache,
+                                   budget=_budget(args)))
     out = Path(args.out or f"{rep.paper.id}.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(rep.model_dump_json())
@@ -45,7 +51,8 @@ def cmd_analyze(args):
     print(f"完成（{time.time() - t:.1f}s）：{s['nodes']} 个条目，显式依赖 {s['edges_explicit']}，推断依赖 {s['edges_inferred']}，"
           f"符号依赖 {s['edges_symbol']}，风险点 {s['risks']}（审稿对抗 {s['risks_review']}）")
     print(f"LLM 调用 {rep.pipeline.llm_calls} 次（缓存命中 {rep.pipeline.llm_cached}），"
-          f"输入 {rep.pipeline.tokens_in} / 输出 {rep.pipeline.tokens_out} tokens")
+          f"输入 {rep.pipeline.tokens_in} / 输出 {rep.pipeline.tokens_out} tokens，花费约 ${rep.pipeline.cost_usd:.2f}"
+          + (f"（{rep.pipeline.budget_note}）" if rep.pipeline.budget_note else ""))
     print(f"报告已写入 {out}")
 
 
@@ -91,7 +98,8 @@ def cmd_demo(args):
         t = time.time()
         rep = asyncio.run(run_pipeline(root, paper_id=out_id, arxiv_id=aid, use_llm=not args.no_llm,
                                        review_max=entry.get("review_max", args.review_max),
-                                       progress=_progress_printer(), use_cache=not args.no_cache))
+                                       progress=_progress_printer(), use_cache=not args.no_cache,
+                                       budget=_budget(args)))
         if aid and (not rep.paper.abstract or not rep.paper.authors):
             meta = fetch_arxiv_meta(aid)
             rep.paper.abstract = rep.paper.abstract or meta.get("abstract")
@@ -111,8 +119,11 @@ def cmd_demo(args):
             "generated_at": rep.pipeline.generated_at,
         }
         s = rep.stats
-        print(f"   {time.time() - t:.0f}s：{s['nodes']} 条目 / {s['edges_explicit']}+{s['edges_inferred']}+{s['edges_symbol']} 依赖 / "
-              f"{s['risks']} 风险点；LLM {rep.pipeline.llm_calls} 次调用（缓存 {rep.pipeline.llm_cached}）", file=sys.stderr)
+        units = f"{s['nodes']} 条目" if s['nodes'] or not s.get('sections') else f"{s['sections']} 章节、{s.get('claims', 0)} 论断"
+        print(f"   {time.time() - t:.0f}s：{units} / {s['edges_explicit']}+{s['edges_inferred']}+{s['edges_symbol']} 依赖 / "
+              f"{s['risks']} 风险点；LLM {rep.pipeline.llm_calls} 次调用（缓存 {rep.pipeline.llm_cached}），"
+              f"花费约 ${rep.pipeline.cost_usd:.2f}" + (f"（{rep.pipeline.budget_note}）" if rep.pipeline.budget_note else ""),
+              file=sys.stderr)
     order = [e["id"] for e in cfg["papers"]]
 
     def sort_key(e):
@@ -135,6 +146,10 @@ def cmd_publish(args):
         if not args.keep_sources:
             rep["sources"] = {}
             rep["paper"]["sources_redacted"] = True
+            # Structure-mode section nodes carry the section's full text: keep only an excerpt.
+            for n in rep["nodes"]:
+                if n.get("kind") == "section" and len(n.get("statement") or "") > 400:
+                    n["statement"] = n["statement"][:400].rstrip() + " …（公开版本只保留开头，全文见 arXiv）"
         (out / entry["file"]).write_text(json.dumps(rep, ensure_ascii=False, separators=(",", ":")))
         after = len(json.dumps(rep, ensure_ascii=False))
         print(f"  {entry['id']}: {before // 1024} KB -> {after // 1024} KB")
@@ -179,6 +194,7 @@ def main(argv=None):
     a.add_argument("--no-llm", action="store_true", help="只运行确定性分析")
     a.add_argument("--no-cache", action="store_true", help="不使用 LLM 响应缓存")
     a.add_argument("--review-max", type=int, default=None, help="审稿对抗最多审查多少个证明（默认 30）")
+    a.add_argument("--budget", type=float, default=None, help="本次分析的大模型花费上限（美元），默认不限")
     a.set_defaults(func=cmd_analyze)
 
     f = sub.add_parser("fetch", help="下载 arXiv 论文的 LaTeX 源码")
@@ -192,6 +208,7 @@ def main(argv=None):
     d.add_argument("--no-llm", action="store_true")
     d.add_argument("--no-cache", action="store_true")
     d.add_argument("--review-max", type=int, default=None)
+    d.add_argument("--budget", type=float, default=None, help="每篇的大模型花费上限（美元），默认不限")
     d.add_argument("--tag", help="保存为对照版本（如 deepseek），不覆盖原报告：papers/<id>--<tag>.json")
     d.set_defaults(func=cmd_demo)
 

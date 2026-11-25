@@ -24,7 +24,9 @@ export function RiskCard({ risk, compact = false }: { risk: Risk; compact?: bool
             {STATUS_LABEL[risk.status] ?? risk.status}
           </Tag>
         ) : null}
-        <Tag tone={risk.source === "review" ? "purple" : "grey"}>{risk.source === "review" ? "审稿对抗" : "结构检查"}</Tag>
+        <Tag tone={risk.source === "review" ? "purple" : "grey"}>
+          {risk.source === "review" ? (risk.id.startsWith("Q") ? "论断审查" : risk.category === "numeric" ? "数字核对" : "审稿对抗") : risk.category === "numeric" ? "数字核对（程序）" : "结构检查"}
+        </Tag>
         {compact ? null : (
           <button className="link-btn right" onClick={() => showRisk(risk.id)} title="在图中显示相关条目">
             <Crosshair size={13} /> 在图中显示
@@ -124,6 +126,10 @@ export function RiskPanel() {
   );
   const reviewed = report.nodes.filter((n) => n.review && n.review.status !== "skipped");
   const passed = reviewed.filter((n) => n.review?.status === "passed").length;
+  const structure = report.paper.mode === "structure";
+  const claims = reviewed.filter((n) => n.kind === "assertion");
+  const proofs = reviewed.filter((n) => n.kind !== "assertion");
+  const budgetSkipped = report.nodes.filter((n) => n.review?.reason === "budget").length;
 
   return (
     <div className="risk-panel">
@@ -148,14 +154,30 @@ export function RiskPanel() {
       {report.pipeline.llm_enabled ? (
         <div className="note">
           <Info size={15} />
-          <span>
-          审稿对抗共审查 {reviewed.length} 个证明，其中 {passed} 个的所有质疑都被作者智能体以原文依据化解；
-          下面只列出双方没能达成一致、作者承认、或双方认为次要的问题，并经主审复核合并重复、统一定级。
-          “高”表示结论本身可能有误，“中”表示证明需要实质补证；笔误、记号和退化情形归为“低 / 提示”，在“投稿自查”模式中显示。结构检查项由程序确定性给出。
-          </span>
+          {structure ? (
+            <span>
+              这篇论文没有定理类环境，体检对象是核心论断：共审查 {claims.length} 条论断
+              {proofs.length ? `和 ${proofs.length} 个证明` : ""}，其中 {passed} 项的所有质疑都被作者智能体以论文中的证据化解；
+              下面只列出双方没能达成一致、作者承认、或双方认为次要的问题，并经主审复核合并重复、统一定级。
+              “高”表示核心论断与论文自己的证据矛盾，“中”表示证据弱于论断（比较不对等、缺少对照等）。“数字核对”先由程序找出同一指标前后取值不同的地方，再由审稿人智能体逐条确认。
+              {budgetSkipped ? `（另有 ${budgetSkipped} 项因花费上限没有审查。）` : ""}
+            </span>
+          ) : (
+            <span>
+              审稿对抗共审查 {reviewed.length} 个证明，其中 {passed} 个的所有质疑都被作者智能体以原文依据化解；
+              下面只列出双方没能达成一致、作者承认、或双方认为次要的问题，并经主审复核合并重复、统一定级。
+              “高”表示结论本身可能有误，“中”表示证明需要实质补证；笔误、记号和退化情形归为“低 / 提示”，在“投稿自查”模式中显示。结构检查项由程序确定性给出。
+              {budgetSkipped ? `（另有 ${budgetSkipped} 个证明因花费上限没有审查。）` : ""}
+            </span>
+          )}
         </div>
       ) : (
-        <div className="note warn"><Info size={15} />这份报告没有运行大模型阶段，只包含程序确定性检测到的结构问题（未定义引用、循环依赖、无证明结论、记号疑点）。</div>
+        <div className="note warn">
+          <Info size={15} />
+          {structure
+            ? "这份报告没有运行大模型阶段，只包含程序确定性检测到的问题（未定义引用、记号疑点、数字前后不一致的候选）。数字候选是按上下文启发式配对的，需要读者核实。"
+            : "这份报告没有运行大模型阶段，只包含程序确定性检测到的结构问题（未定义引用、循环依赖、无证明结论、记号疑点）。"}
+        </div>
       )}
       <div className="filter-row">
         <select value={cat} onChange={(e) => setCat(e.target.value)}>

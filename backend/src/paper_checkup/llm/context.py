@@ -163,6 +163,21 @@ def full_paper(ctx: AnalysisContext, max_chars: int = 900_000) -> str:
             pp = ctx.paper.proofs[pi]
             opens.setdefault(pp.outer_start, []).append(f"【{b.id} 的证明开始】")
             closes.setdefault(max(pp.outer_start, pp.outer_end - 1), []).append(f"【{b.id} 的证明结束】")
+    if ctx.gb.mode == "structure":
+        # Structure mode: mark sections, floats and numbered equations so that claims can point at them by id.
+        for a, z, nid in ctx.gb.unit_spans:
+            n = ctx.nodes.get(nid)
+            if n is None:
+                continue
+            name = ctx.node_name(nid)
+            if n.kind == "section":
+                title = f" {n.title}" if n.title and n.number else ""
+                opens.setdefault(a, []).append(f"【{nid} · {name}{title}】")
+            elif n.kind == "equation":
+                opens.setdefault(a, []).append(f"【{nid} · {name}】")
+            else:
+                opens.setdefault(a, []).append(f"【{nid} · {name} 开始】")
+                closes.setdefault(max(a, z - 1), []).append(f"【{nid} 结束】")
     out: list[str] = [f"# 论文全文：{ctx.meta.title}"]
     cur_file = None
     open_at = sorted(opens)
@@ -223,8 +238,11 @@ def _norm_map(s: str) -> tuple[str, list[int]]:
 
 
 def locate_quote(ctx: AnalysisContext, quote: str | None, regions: list[tuple[int, int]],
-                 line_hint: int | None = None) -> int | None:
-    """Find a model-provided quote inside the given source regions; return an offset or None."""
+                 line_hint: int | None = None, line_fallback: bool = True) -> int | None:
+    """Find a model-provided quote inside the given source regions; return an offset or None.
+
+    With line_fallback, a quote that cannot be matched is placed at the model's line number (fine for the
+    location of a challenge); pass False when the quote itself is the content (claims) and must be verbatim."""
     if not quote:
         return None
     q = re.sub(r"^L\d+\|\s*", "", quote.strip())
@@ -248,7 +266,7 @@ def locate_quote(ctx: AnalysisContext, quote: str | None, regions: list[tuple[in
             k = nreg_l.find(nv)
             if k >= 0:
                 return a + idx[k]
-    if line_hint is not None:
+    if line_hint is not None and line_fallback:
         # fall back to the line number the model gave, if it lies inside a region
         for (a, b) in regions:
             fa, la = ctx.flat.loc(a)

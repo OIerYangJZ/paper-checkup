@@ -10,7 +10,7 @@ from pathlib import Path
 from . import __version__
 from .analysis.bibliography import build_bibliography
 from .analysis.checks import Checker
-from .analysis.graph import GraphBuilder
+from .analysis.graph import STRUCT_KINDS, GraphBuilder
 from .analysis.symbols import extract_symbols
 from .latex.preamble import katex_macros
 from .latex.scan import strip_latex_to_text
@@ -67,7 +67,7 @@ def analyze_structure(root: Path, paper_id: str | None = None, arxiv_id: str | N
     title = paper.info.title or Path(flat.main_file).stem
     pid = paper_id or slugify(arxiv_id or Path(flat.main_file).stem)
     meta = PaperMeta(id=pid, title=title, authors=paper.info.authors, abstract=abstract, arxiv_id=arxiv_id,
-                     main_file=flat.main_file, documentclass=paper.info.documentclass)
+                     main_file=flat.main_file, documentclass=paper.info.documentclass, mode=gb.mode)
     return AnalysisContext(root=Path(root), flat=flat, paper=paper, gb=gb, nodes=nodes, edges=edges,
                            symbols=symbols, risks=risks, checker=checker, meta=meta)
 
@@ -96,7 +96,7 @@ def collect_sources(ctx: AnalysisContext, nodes: list[Node], risks: list[Risk]) 
 
 def assemble_report(ctx: AnalysisContext, pipeline: PipelineInfo | None = None) -> Report:
     nodes = list(ctx.nodes.values())
-    kind_rank = {"external": 2, "equation": 1}
+    kind_rank = {"external": 2, "equation": 1} if ctx.gb.mode == "theorem" else {"external": 2}
     nodes.sort(key=lambda n: (kind_rank.get(n.kind, 0), n.order if n.order >= 0 else 0, n.id))
     edges = ctx.edges
     for i, e in enumerate(edges):
@@ -105,8 +105,12 @@ def assemble_report(ctx: AnalysisContext, pipeline: PipelineInfo | None = None) 
     sev_rank = {"high": 0, "medium": 1, "low": 2, "info": 3}
     risks.sort(key=lambda r: (sev_rank.get(r.severity, 9), 0 if r.source == "review" else 1, r.id))
     sources = collect_sources(ctx, nodes, risks)
-    blocks = [n for n in nodes if n.kind not in ("external", "equation")]
+    blocks = [n for n in nodes if n.kind not in ("external", "equation") and n.kind not in STRUCT_KINDS]
     stats = {
+        "sections": sum(1 for n in nodes if n.kind == "section"),
+        "figures": sum(1 for n in nodes if n.kind in ("figure", "pseudocode", "listing")),
+        "tables": sum(1 for n in nodes if n.kind == "table"),
+        "claims": sum(1 for n in nodes if n.kind == "assertion"),
         "nodes": len(blocks),
         "definitions": sum(1 for n in blocks if n.kind == "definition"),
         "results": sum(1 for n in blocks if n.kind in ("theorem", "lemma", "proposition", "corollary", "claim", "fact")),
@@ -121,7 +125,8 @@ def assemble_report(ctx: AnalysisContext, pipeline: PipelineInfo | None = None) 
         "symbols": len(ctx.symbols),
         "risks": len(risks),
         "risks_review": sum(1 for r in risks if r.source == "review"),
-        "total_chars": sum(n.statement_chars + n.proof_chars for n in blocks),
+        "total_chars": sum(n.statement_chars + n.proof_chars for n in blocks) if blocks else
+                       sum(n.statement_chars for n in nodes if n.kind == "section"),
         "source_chars": len(ctx.flat.text) - ctx.paper.body_start,
     }
     if pipeline is None:

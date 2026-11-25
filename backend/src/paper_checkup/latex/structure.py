@@ -39,6 +39,11 @@ NUMBERED_EQ_ENVS = {"equation", "align", "alignat", "flalign", "gather", "multli
 FIGURE_ENVS = {"figure", "figure*", "table", "table*", "algorithm", "algorithm*", "wrapfigure", "subfigure",
                "lstlisting", "listing"}
 LIST_ENVS = {"enumerate", "itemize", "description", "enumerate*", "compactenum", "inparaenum"}
+# Top-level floats that get their own node in structure mode (subfigure/subtable belong to their parent float).
+FLOAT_KIND = {"figure": "figure", "figure*": "figure", "wrapfigure": "figure", "table": "table", "table*": "table",
+              "algorithm": "algorithm", "algorithm*": "algorithm", "lstlisting": "listing", "listing": "listing"}
+FLOAT_DISPLAY = {"figure": "Figure", "table": "Table", "algorithm": "Algorithm", "listing": "Listing"}
+FLOAT_PREFIX = {"figure": "fig", "table": "tab", "algorithm": "alg", "listing": "lst"}
 SECTION_LEVELS = {"part": -1, "chapter": 0, "section": 1, "subsection": 2, "subsubsection": 3, "paragraph": 4}
 
 REF_COMMANDS = ["ref", "eqref", "cref", "Cref", "autoref", "Autoref", "vref", "Vref", "nameref", "labelcref",
@@ -127,6 +132,27 @@ class Equation:
 
 
 @dataclass
+class Float:
+    index: int
+    kind: str                 # figure | table | algorithm | listing
+    env: Env
+    number: str | None = None
+    caption: str | None = None
+    caption_span: tuple[int, int] | None = None
+    captions: list[tuple[int, int]] = field(default_factory=list)   # all counted captions
+    labels: list[str] = field(default_factory=list)
+    section_id: str | None = None
+    id: str = ""
+
+    @property
+    def display(self) -> str:
+        return FLOAT_DISPLAY[self.kind]
+
+    def display_name(self) -> str:
+        return f"{self.display} {self.number}" if self.number else self.display
+
+
+@dataclass
 class LabelTarget:
     label: str
     kind: str        # block | equation | section | figure | item | other
@@ -165,6 +191,8 @@ class ParsedPaper:
     cites: list[Occurrence]
     math: list[MathSegment]
     abstract: tuple[int, int] | None
+    floats: list[Float] = field(default_factory=list)
+    eq_lines: list[tuple[int, int, str | None, Env]] = field(default_factory=list)   # every display-math line
 
     @property
     def text(self) -> str:
@@ -363,9 +391,49 @@ def parse_document(flat: FlatDocument) -> ParsedPaper:
                                 appendix=(first_appendix is not None and sm.start() > first_appendix)))
     has_chapters = any(s.command == "chapter" for s in sections)
 
+    # ---- floats (figures, tables, algorithms) ---------------------------------
+    floats: list[Float] = []
+    float_by_env: dict[int, int] = {}
+    for e in envs:
+        if e.name not in FLOAT_KIND or not (body_start <= e.begin < body_end):
+            continue
+        par = e.parent
+        nested = False
+        while par is not None:
+            if envs[par].name in FLOAT_KIND:
+                nested = True
+                break
+            par = envs[par].parent
+        if nested:
+            continue
+        f = Float(index=len(floats), kind=FLOAT_KIND[e.name], env=e)
+        if f.kind != "listing":
+            # Every \caption steps the float counter (also inside a minipage), except subcaptions of
+            # subfigure/subtable environments. The float is named after its first counted caption.
+            inner_sub = [(x.begin, x.end) for x in envs if x.begin > e.begin and x.end <= e.end
+                         and x.name.rstrip("*") in ("subfigure", "subtable")]
+            for cm in re.finditer(r"\\caption\s*(?:\[[^\]]*\]\s*)?", text[e.body_start:e.body_end]):
+                off = e.body_start + cm.start()
+                g = read_group(text, e.body_start + cm.end())
+                if g is None or any(a <= off < b for a, b in inner_sub):
+                    continue
+                f.captions.append((off, g[2]))
+                if f.caption is None:
+                    f.caption = g[0].strip()
+                    f.caption_span = (off, g[2])
+        float_by_env[e.index] = f.index
+        floats.append(f)
+
     # ---- numbering (single ordered pass) -------------------------------------
     counters = Counters(info, has_chapters)
+    if has_chapters:
+        for c in ("figure", "table", "algorithm"):
+            counters.within.setdefault(c, "chapter")
+            counters.children["chapter"].append(c)
     events: list[tuple[int, int, str, object]] = []
+    for f in floats:
+        for ci, (coff, _) in enumerate(f.captions):
+            events.append((coff, 3, "float", (f, ci)))
     for s in sections:
         events.append((s.offset, 0, "section", s))
     if first_appendix is not None:
@@ -399,6 +467,12 @@ def parse_document(flat: FlatDocument) -> ParsedPaper:
             if b.spec.counter:
                 counters.step(b.spec.counter)
                 b.number = counters.the(b.spec.counter)
+            continue
+        if kind == "float":
+            fl, ci = obj  # type: ignore
+            counters.step(fl.kind)
+            if ci == 0:
+                fl.number = counters.the(fl.kind)
             continue
         if kind == "eq":
             e: Env = obj  # type: ignore
@@ -444,6 +518,14 @@ def parse_document(flat: FlatDocument) -> ParsedPaper:
 
     for b in blocks:
         b.section_id = section_id_at(b.env.begin)
+    used_float_ids: set[str] = set()
+    for f in floats:
+        f.section_id = section_id_at(f.env.begin)
+        fid = f"{FLOAT_PREFIX[f.kind]}-{re.sub(r'[^A-Za-z0-9.]+', '', f.number)}" if f.number else f"{FLOAT_PREFIX[f.kind]}-u{f.index}"
+        while fid in used_float_ids:
+            fid += "b"
+        used_float_ids.add(fid)
+        f.id = fid
 
     # ---- proofs --------------------------------------------------------------
     proofs: list[ProofPart] = []
@@ -531,7 +613,12 @@ def parse_document(flat: FlatDocument) -> ParsedPaper:
                 target = LabelTarget(lab, "item", None, off, "item", block=enclosing_block)
                 break
             if e.name in FIGURE_ENVS:
-                target = LabelTarget(lab, "figure", None, off, e.name.rstrip("*").capitalize())
+                fi = next((float_by_env[x.index] for x in reversed(containing) if x.index in float_by_env), None)
+                if fi is not None:
+                    floats[fi].labels.append(lab)
+                    target = LabelTarget(lab, "figure", fi, off, floats[fi].display_name())
+                else:
+                    target = LabelTarget(lab, "figure", None, off, e.name.rstrip("*").capitalize())
                 break
             if e.index in block_by_env:
                 bi = block_by_env[e.index]
@@ -707,7 +794,8 @@ def parse_document(flat: FlatDocument) -> ParsedPaper:
 
     return ParsedPaper(flat=flat, info=info, body_start=body_start, body_end=body_end, envs=envs,
                        sections=sections, blocks=blocks, proofs=proofs, equations=equations, labels=labels,
-                       duplicate_labels=duplicates, refs=refs, cites=cites, math=math, abstract=abstract)
+                       duplicate_labels=duplicates, refs=refs, cites=cites, math=math, abstract=abstract,
+                       floats=floats, eq_lines=eq_line_spans)
 
 
 # ---------------------------------------------------------------------------
