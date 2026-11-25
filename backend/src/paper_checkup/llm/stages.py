@@ -925,3 +925,65 @@ async def stage_meta_review(ctx: AnalysisContext, client: LLMClient, progress: P
             extra = "；".join(by_id[m].title for m in r.merged_ids if m in by_id)
             r.editor_note = ((r.editor_note or "") + f"（已合并 {len(r.merged_ids)} 条相近的质疑：{extra}）").strip()
     return {"reviewed": decided, "merged": merged, "regraded": changed}
+
+
+# ---------------------------------------------------------------------------
+# Reading guide for students (summary, mind map, per-section notes, concepts, prerequisites, questions)
+# ---------------------------------------------------------------------------
+
+async def stage_guide(ctx: AnalysisContext, client: LLMClient, progress: Progress = _noop) -> dict:
+    lines = []
+    for sec in ctx.gb.sections:
+        if sec.level > 3:
+            continue
+        num = (f"附录 {sec.number}" if sec.appendix and sec.level <= 1 else sec.number) if sec.number else ""
+        where = f"（{sec.loc.file}:L{sec.loc.line_start}）" if sec.loc else ""
+        lines.append(f"- {sec.id} · {'  ' * max(0, sec.level - 1)}{num} {sec.title}{where}".rstrip())
+    task = P.GUIDE_TASK + "\n\n## 章节目录\n" + ("\n".join(lines) or "（无）")
+    claims = [n for n in ctx.nodes.values() if n.kind == "assertion"]
+    if claims:
+        task += "\n\n## 核心论断（论断审查的对象）\n" + "\n".join(
+            f"- {n.id}：{n.title or ''}｜{_clip(render(ctx, n.statement), 200)}" for n in sorted(claims, key=lambda n: n.order))
+    risks = [r for r in ctx.risks if r.severity in ("high", "medium")][:30]
+    if risks:
+        task += "\n\n## 体检发现的风险点（高 / 中）\n" + "\n".join(
+            f"- {r.id}（{ {'high': '高', 'medium': '中'}[r.severity] }，{', '.join(r.node_ids[:3])}）{r.title}" for r in risks)
+    data = await client.json("extract", _system(ctx, client), [paper_prefix(ctx), task], P.GUIDE_SCHEMA, "guide",
+                             max_tokens=16000, budget_reserve=0.0)
+    valid = set(ctx.nodes) | {s.id for s in ctx.gb.sections} | {r.id for r in ctx.risks} | \
+        {f.id for f in (ctx.extra.get("figures") or [])} | {f.id for f in ctx.paper.floats}
+
+    def ids(xs) -> list[str]:
+        return list(dict.fromkeys(x for x in (xs or []) if isinstance(x, str) and x in valid))[:8]
+
+    mm, keys = [], set()
+    for it in (data.get("mindmap") or [])[:60]:
+        key, label = str(it.get("key") or "").strip(), _clean(it.get("label") or "")
+        if not key or not label or key in keys:
+            continue
+        keys.add(key)
+        mm.append({"key": key, "parent": it.get("parent"), "label": label[:40], "note": _clean(it.get("note") or ""),
+                   "ids": ids(it.get("ids"))})
+    for it in mm:      # dangling parents become first-level branches
+        if it["parent"] not in keys:
+            it["parent"] = None
+    sec_ids = {s.id for s in ctx.gb.sections}
+    guide = {
+        "summary": _clean(data.get("summary") or ""),
+        "audience": _clean(data.get("audience") or ""),
+        "organization": _clean(data.get("organization") or ""),
+        "mindmap": mm,
+        "sections": [{"id": x["id"], "summary": _clean(x.get("summary") or ""),
+                      "key_points": [_clean(k) for k in (x.get("key_points") or []) if k][:6]}
+                     for x in (data.get("sections") or []) if x.get("id") in sec_ids],
+        "concepts": [{"term": _clean(x.get("term") or ""), "explanation": _clean(x.get("explanation") or ""),
+                      "ids": ids(x.get("ids"))} for x in (data.get("concepts") or []) if x.get("term")][:20],
+        "prerequisites": [{"name": _clean(x.get("name") or ""), "why": _clean(x.get("why") or ""),
+                           "level": x.get("level") if x.get("level") in ("basic", "intermediate", "advanced") else "intermediate"}
+                          for x in (data.get("prerequisites") or []) if x.get("name")][:10],
+        "questions": [{"question": _clean(x.get("question") or ""), "hint": _clean(x.get("hint") or ""),
+                       "ids": ids(x.get("ids"))} for x in (data.get("questions") or []) if x.get("question")][:10],
+        "model": client.config.models.get("extract"),
+    }
+    ctx.extra["guide"] = guide
+    return {"nodes": len(mm), "sections": len(guide["sections"]), "concepts": len(guide["concepts"])}

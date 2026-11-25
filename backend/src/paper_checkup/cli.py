@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import shutil
 import logging
 import sys
 import time
@@ -68,6 +69,86 @@ def cmd_fetch(args):
     print(f"已下载到 {root}")
 
 
+def _preset_root(entry: dict) -> Path:
+    from .sources import fetch_arxiv
+
+    if entry.get("path"):
+        return (DEMO_CONFIG.parent / entry["path"]).resolve()
+    aid = entry["arxiv_id"]
+    dest = PAPERS_DIR / "raw" / aid.replace("/", "_") / "src"
+    if not (dest.exists() and any(dest.iterdir())):
+        print(f"下载 arXiv:{aid} …", file=sys.stderr)
+        fetch_arxiv(aid, dest)
+    subdirs = [p for p in dest.iterdir() if not p.name.startswith(".")]
+    return subdirs[0] if len(subdirs) == 1 and subdirs[0].is_dir() else dest
+
+
+def cmd_augment(args):
+    """Add figure images (and, unless --no-guide, the reading guide) to existing preset reports without re-running
+    the review stages: the node ids are deterministic, so the new parts line up with the old report."""
+    from .analysis.figures import build_figures
+    from .deterministic import analyze_structure
+
+    cfg = {e["id"]: e for e in json.loads(Path(args.config or DEMO_CONFIG).read_text())["papers"]}
+    index = json.loads((PRESET_DATA_DIR / "index.json").read_text())
+    total = 0.0
+    for item in index:
+        base = item["id"].split("--")[0]
+        if (args.only and item["id"] not in args.only and base not in args.only) or base not in cfg:
+            continue
+        path = PRESET_DATA_DIR / item["file"]
+        rep = json.loads(path.read_text())
+        ctx = analyze_structure(_preset_root(cfg[base]), paper_id=rep["paper"]["id"], arxiv_id=cfg[base].get("arxiv_id"))
+        missing = [n["id"] for n in rep["nodes"] if n["kind"] not in ("external", "assertion") and n["id"] not in ctx.nodes
+                   and not n["id"].startswith("ext-")]
+        if missing:
+            print(f"  {item['id']}: 跳过——确定性解析与报告不一致（{missing[:5]}）", file=sys.stderr)
+            continue
+        if not args.no_figures:
+            figs = build_figures(ctx, PRESET_DATA_DIR / "figs" / base, render_latex=not args.no_latex_figures)
+            rep["figures"] = [f.model_dump() for f in figs]
+            rep["assets"] = f"figs/{base}"
+            print(f"  {item['id']}: {sum(bool(f.images) for f in figs)}/{len(figs)} 个图表有图片", file=sys.stderr)
+        if not args.no_guide:
+            cost = asyncio.run(_add_guide(ctx, rep, budget=args.budget))
+            total += cost
+            g = rep.get("guide") or {}
+            print(f"  {item['id']}: 导读 {len(g.get('mindmap', []))} 个导图节点、{len(g.get('sections', []))} 节解读，"
+                  f"花费约 ${cost:.3f}", file=sys.stderr)
+        path.write_text(json.dumps(rep, ensure_ascii=False))
+    print(f"完成，导读共花费约 ${total:.3f}", file=sys.stderr)
+
+
+async def _add_guide(ctx, rep: dict, budget: float | None = None) -> float:
+    from .llm import stages
+    from .llm.pricing import Budget
+    from .llm.provider import LLMClient, LLMConfig
+    from .models import Risk
+
+    cfg = LLMConfig.from_env()
+    if not cfg.enabled:
+        raise SystemExit(f"大模型未启用：{cfg.reason_disabled}")
+    ctx.risks[:] = [Risk(**r) for r in rep.get("risks", [])]
+    for n in rep["nodes"]:      # claims and LLM-found externals exist only in the report
+        if n["id"] not in ctx.nodes:
+            from .models import Node
+            ctx.nodes[n["id"]] = Node(**n)
+    client = LLMClient(cfg, budget=Budget(per_job=budget) if budget else None)
+    try:
+        await stages.stage_guide(ctx, client)
+    finally:
+        await client.aclose()
+    rep["guide"] = ctx.extra.get("guide")
+    pl = rep.setdefault("pipeline", {})
+    pl["cost_usd"] = round((pl.get("cost_usd") or 0) + client.stats.cost_usd, 4)
+    stages_list = [s for s in pl.get("stages", []) if s.get("name") != "guide"]
+    g = rep["guide"] or {}
+    stages_list.append({"name": "guide", "status": "done" if rep["guide"] else "error", "seconds": None,
+                        "detail": f"导读生成：{len(g.get('mindmap', []))} 个导图节点、{len(g.get('sections', []))} 节解读"})
+    pl["stages"] = stages_list
+    return client.stats.cost_usd
+
+
 def cmd_demo(args):
     """Build the preset reports shown on the landing page."""
     from .pipeline import run_pipeline
@@ -82,24 +163,15 @@ def cmd_demo(args):
         if args.only and entry["id"] not in args.only:
             continue
         aid = entry.get("arxiv_id")
-        if entry.get("path"):
-            root = (DEMO_CONFIG.parent / entry["path"]).resolve()
-        else:
-            dest = PAPERS_DIR / "raw" / aid.replace("/", "_") / "src"
-            if not (dest.exists() and any(dest.iterdir())):
-                print(f"下载 arXiv:{aid} …", file=sys.stderr)
-                fetch_arxiv(aid, dest)
-            root = dest
-            subdirs = [p for p in dest.iterdir() if not p.name.startswith(".")]
-            if len(subdirs) == 1 and subdirs[0].is_dir():
-                root = subdirs[0]
+        root = _preset_root(entry)
         out_id = f"{entry['id']}--{args.tag}" if args.tag else entry["id"]
         print(f"== {out_id} ({aid or root})", file=sys.stderr)
         t = time.time()
         rep = asyncio.run(run_pipeline(root, paper_id=out_id, arxiv_id=aid, use_llm=not args.no_llm,
                                        review_max=entry.get("review_max", args.review_max),
                                        progress=_progress_printer(), use_cache=not args.no_cache,
-                                       budget=_budget(args)))
+                                       budget=_budget(args), figures_dir=PRESET_DATA_DIR / "figs" / entry["id"],
+                                       assets=f"figs/{entry['id']}", render_latex=not args.no_latex_figures))
         if aid and (not rep.paper.abstract or not rep.paper.authors):
             meta = fetch_arxiv_meta(aid)
             rep.paper.abstract = rep.paper.abstract or meta.get("abstract")
@@ -143,7 +215,7 @@ def cmd_publish(args):
     for entry in index:
         rep = json.loads((src / entry["file"]).read_text())
         before = len(json.dumps(rep, ensure_ascii=False))
-        if not args.keep_sources:
+        if args.redact:
             rep["sources"] = {}
             rep["paper"]["sources_redacted"] = True
             # Structure-mode section nodes carry the section's full text: keep only an excerpt.
@@ -154,6 +226,16 @@ def cmd_publish(args):
         after = len(json.dumps(rep, ensure_ascii=False))
         print(f"  {entry['id']}: {before // 1024} KB -> {after // 1024} KB")
     (out / "index.json").write_text(json.dumps(index, ensure_ascii=False, indent=2))
+    figs = src / "figs"
+    if figs.is_dir() and not args.redact:
+        n = 0
+        for f in figs.rglob("*"):
+            if f.is_file():
+                dst = out / f.relative_to(src)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(f, dst)
+                n += 1
+        print(f"  复制了 {n} 个图片文件")
     print(f"公开版本已写入 {out}")
 
 
@@ -209,13 +291,23 @@ def main(argv=None):
     d.add_argument("--no-cache", action="store_true")
     d.add_argument("--review-max", type=int, default=None)
     d.add_argument("--budget", type=float, default=None, help="每篇的大模型花费上限（美元），默认不限")
+    d.add_argument("--no-latex-figures", action="store_true", help="不用 LaTeX 单独编译 TikZ / 表格等浮动体")
     d.add_argument("--tag", help="保存为对照版本（如 deepseek），不覆盖原报告：papers/<id>--<tag>.json")
     d.set_defaults(func=cmd_demo)
 
-    pb = sub.add_parser("publish", help="生成公开部署用的预置报告（去掉论文完整源码）")
+    au = sub.add_parser("augment", help="给已有的预置报告补上图片和导读（不重跑审稿阶段）")
+    au.add_argument("--config")
+    au.add_argument("--only", nargs="*")
+    au.add_argument("--no-guide", action="store_true")
+    au.add_argument("--no-figures", action="store_true")
+    au.add_argument("--no-latex-figures", action="store_true")
+    au.add_argument("--budget", type=float, default=None)
+    au.set_defaults(func=cmd_augment)
+
+    pb = sub.add_parser("publish", help="生成公开部署用的预置报告（复制图片；--redact 去掉源码与图片）")
     pb.add_argument("--src", help="默认 frontend/public/data")
     pb.add_argument("--out", default=str(PRESET_DATA_DIR.parents[2] / "site" / "data"))
-    pb.add_argument("--keep-sources", action="store_true")
+    pb.add_argument("--redact", action="store_true", help="去掉论文源码与图片（arXiv 默认许可证不授权再分发）")
     pb.set_defaults(func=cmd_publish)
 
     p = sub.add_parser("path", help="打印某个条目的阅读路径")

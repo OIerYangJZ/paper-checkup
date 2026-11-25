@@ -171,6 +171,21 @@ class StageInfo(BaseModel):
     detail: str | None = None
 
 
+class FigureInfo(BaseModel):
+    """A figure / table / algorithm float and its images (deterministic: the paper's own files or LaTeX output)."""
+    id: str                  # fig-1 / tab-2 / alg-1 (the node id in structure mode)
+    kind: str                # figure | table | algorithm | listing
+    number: str | None = None
+    caption: str = ""
+    labels: list[str] = Field(default_factory=list)
+    loc: Loc | None = None
+    section_id: str | None = None
+    images: list[str] = Field(default_factory=list)      # file names under the report's asset directory
+    source: str | None = None                             # files | latex
+    note: str | None = None                               # why there is no image
+    referenced_by: list[str] = Field(default_factory=list)  # node ids whose text refers to this float
+
+
 class PaperMeta(BaseModel):
     id: str
     title: str
@@ -217,3 +232,6 @@ class Report(BaseModel):
     risks: list[Risk] = Field(default_factory=list)
     sources: dict[str, str] = Field(default_factory=dict)
     stats: dict[str, int | float] = Field(default_factory=dict)
+    figures: list[FigureInfo] = Field(default_factory=list)
+    assets: str | None = None        # where the figure images live: "figs/<paper>" (presets) or "job:<id>" (web jobs)
+    guide: dict | None = None        # reading guide (LLM): summary, mind map, per-section notes, concepts, questions

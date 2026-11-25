@@ -10,6 +10,7 @@ from pathlib import Path
 from . import __version__
 from .analysis.bibliography import build_bibliography
 from .analysis.checks import Checker
+from .analysis.figures import build_figures
 from .analysis.graph import STRUCT_KINDS, GraphBuilder
 from .analysis.symbols import extract_symbols
 from .latex.preamble import katex_macros
@@ -139,4 +140,6 @@ def assemble_report(ctx: AnalysisContext, pipeline: PipelineInfo | None = None) 
         theorem_envs={k: v.display for k, v in ctx.paper.info.theorems.items()},
         sections=ctx.gb.sections,
         nodes=nodes, edges=edges, labels=ctx.gb.labels, citations=ctx.gb.citations, symbols=ctx.symbols,
-        risks=risks, sources=sources, stats=stats)
+        risks=risks, sources=sources, stats=stats,
+        figures=ctx.extra.get("figures") or build_figures(ctx), assets=ctx.extra.get("assets"),
+        guide=ctx.extra.get("guide"))

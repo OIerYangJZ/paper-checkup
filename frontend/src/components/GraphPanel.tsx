@@ -31,6 +31,98 @@ function tint(hex: string, amount: number): string {
   return `#${ch((n >> 16) & 255)}${ch((n >> 8) & 255)}${ch(n & 255)}`;
 }
 
+/**
+ * Free navigation: drag with any mouse button (also on nodes) to pan, with a little inertia on release;
+ * trackpad two-finger scroll pans; pinch / Ctrl+wheel / mouse wheel zooms around the pointer.
+ */
+function attachNavigation(cy: Core, el: HTMLElement): () => void {
+  let drag: { x: number; y: number; t: number; moved: boolean } | null = null;
+  let vx = 0;
+  let vy = 0;
+  let raf = 0;
+  const stop = () => {
+    if (raf) cancelAnimationFrame(raf);
+    raf = 0;
+  };
+  const onDown = (e: PointerEvent) => {
+    if (e.pointerType === "touch") return; // cytoscape keeps its own touch gestures
+    stop();
+    drag = { x: e.clientX, y: e.clientY, t: performance.now(), moved: false };
+    vx = vy = 0;
+  };
+  const onMove = (e: PointerEvent) => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x;
+    const dy = e.clientY - drag.y;
+    if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+    drag.moved = true;
+    el.classList.add("panning");
+    const now = performance.now();
+    const dt = Math.max(1, now - drag.t);
+    cy.panBy({ x: dx, y: dy });
+    vx = 0.7 * vx + 0.3 * (dx / dt);
+    vy = 0.7 * vy + 0.3 * (dy / dt);
+    drag.x = e.clientX;
+    drag.y = e.clientY;
+    drag.t = now;
+  };
+  const onUp = () => {
+    if (!drag) return;
+    const moved = drag.moved;
+    const idle = performance.now() - drag.t;
+    drag = null;
+    el.classList.remove("panning");
+    if (!moved || idle > 80) return; // the pointer had stopped: no fling
+    let last = performance.now();
+    const step = (now: number) => {
+      const dt = Math.min(40, now - last);
+      last = now;
+      const decay = Math.pow(0.9, dt / 16);
+      vx *= decay;
+      vy *= decay;
+      if (Math.hypot(vx, vy) < 0.03) {
+        raf = 0;
+        return;
+      }
+      cy.panBy({ x: vx * dt, y: vy * dt });
+      raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+  };
+  const onWheel = (e: WheelEvent) => {
+    e.preventDefault();
+    stop();
+    const rect = el.getBoundingClientRect();
+    const pos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    const pinch = e.ctrlKey || e.metaKey; // trackpad pinch arrives as ctrl+wheel
+    // A mouse wheel sends whole "notches" on one axis; a trackpad sends small or fractional deltas, often on both axes.
+    const mouseWheel = e.deltaMode !== 0 || (e.deltaX === 0 && Math.abs(e.deltaY) >= 50 && Number.isInteger(e.deltaY));
+    if (!pinch && !mouseWheel) {
+      cy.panBy({ x: -e.deltaX, y: -e.deltaY });
+      return;
+    }
+    const k = e.deltaMode === 1 ? 0.06 : pinch ? 0.012 : 0.0025;
+    const level = Math.min(cy.maxZoom(), Math.max(cy.minZoom(), cy.zoom() * Math.exp(-e.deltaY * k)));
+    cy.zoom({ level, renderedPosition: pos });
+  };
+  const noMenu = (e: MouseEvent) => e.preventDefault();
+  el.addEventListener("pointerdown", onDown);
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onUp);
+  el.addEventListener("wheel", onWheel, { passive: false });
+  el.addEventListener("contextmenu", noMenu);
+  return () => {
+    stop();
+    el.removeEventListener("pointerdown", onDown);
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
+    el.removeEventListener("wheel", onWheel);
+    el.removeEventListener("contextmenu", noMenu);
+  };
+}
+
 function textWidth(s: string): number {
   let w = 0;
   for (const ch of s) w += /[\u3000-\u9fff\uff00-\uffef]/.test(ch) ? 12.5 : 7.2;
@@ -137,6 +229,11 @@ export function GraphPanel({ filters, setFilters, selected, path, focusToken, fo
       elements,
       minZoom: 0.08,
       maxZoom: 3,
+      // Panning and zooming are handled below (drag anywhere, trackpad scroll, pinch), so nodes are not draggable.
+      userPanningEnabled: false,
+      userZoomingEnabled: false,
+      boxSelectionEnabled: false,
+      autoungrabify: true,
       style: [
         {
           selector: "node",
@@ -220,11 +317,14 @@ export function GraphPanel({ filters, setFilters, selected, path, focusToken, fo
     });
     cy.on("mouseout", "node", () => {
       setHover(null);
-      container.current!.style.cursor = "default";
+      container.current!.style.cursor = "";
     });
     cy.on("pan zoom", () => setHover(null));
+    const detachNav = attachNavigation(cy, container.current);
+    (window as unknown as { __pcCy?: Core }).__pcCy = cy; // handle for debugging in the browser console
     cyRef.current = cy;
     return () => {
+      detachNav();
       cy.destroy();
       cyRef.current = null;
     };
@@ -419,6 +519,7 @@ export function GraphPanel({ filters, setFilters, selected, path, focusToken, fo
           <span className="legend-box" style={{ borderColor: "#94a3b8", borderStyle: "dotted" }} /> 无证明
         </div>
         <div className="legend-foot">箭头方向：前置条目 → 使用它的条目</div>
+        <div className="legend-foot">拖动（左 / 右键均可）平移 · 双指滑动平移 · 捏合或滚轮缩放</div>
       </div>
     </div>
   );

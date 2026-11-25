@@ -11,6 +11,7 @@ from typing import Callable
 
 from . import __version__
 from .analysis.checks import Checker
+from .analysis.figures import build_figures
 from .deterministic import AnalysisContext, analyze_structure, assemble_report
 from .llm.pricing import Budget
 from .llm.provider import BudgetExceeded, LLMClient, LLMConfig, LLMError
@@ -33,6 +34,7 @@ STAGES = [
     ("numeric_check", "数字一致性核查"),
     ("external_merge", "外部知识合并"),
     ("meta_review", "主审复核"),
+    ("guide", "导读生成"),
 ]
 
 ProgressCb = Callable[[dict], None]
@@ -112,7 +114,8 @@ def rerun_checks(ctx: AnalysisContext):
 async def run_pipeline(root: Path, *, paper_id: str | None = None, arxiv_id: str | None = None,
                        use_llm: bool = True, review_max: int | None = None, config: LLMConfig | None = None,
                        progress: ProgressCb | None = None, partial: Callable[[Report], None] | None = None,
-                       use_cache: bool = True, budget: Budget | None = None) -> Report:
+                       use_cache: bool = True, budget: Budget | None = None, figures_dir: Path | None = None,
+                       assets: str | None = None, render_latex: bool = False) -> Report:
     cfg = config or LLMConfig.from_env()
     llm_on = use_llm and cfg.enabled
     day_note = None
@@ -127,6 +130,10 @@ async def run_pipeline(root: Path, *, paper_id: str | None = None, arxiv_id: str
 
     tracker.start("parse")
     ctx = analyze_structure(Path(root), paper_id=paper_id, arxiv_id=arxiv_id)
+    if figures_dir is not None:
+        tracker.emit("提取论文中的图…")
+        ctx.extra["figures"] = await asyncio.to_thread(build_figures, ctx, figures_dir, render_latex)
+        ctx.extra["assets"] = assets
     structure = ctx.gb.mode == "structure"
     if structure:
         kinds = [n.kind for n in ctx.nodes.values()]
@@ -217,6 +224,8 @@ async def run_pipeline(root: Path, *, paper_id: str | None = None, arxiv_id: str
                   lambda s: f"合并 {s['merged']} 项重复、去掉 {s['dropped']} 项初等常识")
     await guarded("meta_review", lambda: stages.stage_meta_review(ctx, client, step("meta_review")),
                   lambda s: f"复核 {s.get('reviewed', 0)} 条，合并 {s.get('merged', 0)} 条，重新定级 {s.get('regraded', 0)} 条")
+    await guarded("guide", lambda: stages.stage_guide(ctx, client, step("guide")),
+                  lambda s: f"思维导图 {s['nodes']} 个节点、{s['sections']} 节解读、{s['concepts']} 个关键概念")
     await client.aclose()
     return assemble_report(ctx, _pipeline_info(cfg, client, tracker, budget=budget))
 

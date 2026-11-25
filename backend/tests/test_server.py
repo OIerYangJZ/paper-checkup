@@ -38,3 +38,18 @@ def test_token_check_without_configured_token(monkeypatch):
     assert server._token_ok(None) and server._token_ok("anything")
     monkeypatch.setattr(server, "LLM_TOKEN", "abc")
     assert server._token_ok("abc") and server._token_ok(" abc ") and not server._token_ok("abd")
+
+
+def test_figure_endpoint_rejects_bad_names(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "UPLOAD_DIR", tmp_path)
+    (tmp_path / "abc123" / "figures").mkdir(parents=True)
+    (tmp_path / "abc123" / "figures" / "fig-1-1.png").write_bytes(b"\x89PNG\r\n")
+    (tmp_path / "secret.png").write_bytes(b"SECRET")
+    client = TestClient(server.app)
+    r = client.get("/api/jobs/abc123/figures/fig-1-1.png")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/png"
+    # An encoded traversal never reaches the file (with SERVE_STATIC the SPA fallback page may answer instead).
+    r = client.get("/api/jobs/abc123/figures/..%2F..%2Fsecret.png")
+    assert b"SECRET" not in r.content and not r.headers["content-type"].startswith("image/")
+    assert client.get("/api/jobs/abc123/figures/report.json").status_code == 404
+    assert client.get("/api/jobs/ab..c/figures/fig-1-1.png").status_code == 404

@@ -3,7 +3,7 @@ import type { Index } from "../lib/graph";
 import type { RenderCtx } from "../lib/latex";
 import type { Loc, Report } from "../types";
 
-export type Tab = "overview" | "detail" | "path" | "risks" | "symbols";
+export type Tab = "overview" | "guide" | "detail" | "path" | "risks" | "symbols";
 
 export interface PaperContextValue {
   report: Report;
@@ -13,6 +13,9 @@ export interface PaperContextValue {
   openSource: (loc: Loc) => void;
   setPathTarget: (id: string) => void;
   showRisk: (id: string) => void;
+  /** Jump to anything a guide / mind-map entry can point at: a node, a section, a figure or a risk. */
+  goTo: (id: string) => void;
+  openFigure: (id: string) => void;
 }
 
 export const PaperContext = createContext<PaperContextValue | null>(null);

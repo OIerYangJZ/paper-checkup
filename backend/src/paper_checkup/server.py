@@ -57,6 +57,9 @@ _tasks: set[asyncio.Task] = set()
 LLM_TOKEN = os.environ.get("ANALYZE_LLM_TOKEN", "").strip()
 SERVE_STATIC = os.environ.get("SERVE_STATIC", "1").strip().lower() not in ("0", "false", "no", "off")
 CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
+# Figures of uploads are converted with the paper's own image files (PDF via pdftoppm / gs / sips, EPS via gs).
+# Compiling uploaded LaTeX (TikZ, tables) is off unless FIGURES_RENDER_LATEX=1: it runs untrusted TeX code.
+RENDER_LATEX = os.environ.get("FIGURES_RENDER_LATEX", "0").strip().lower() in ("1", "true", "yes", "on")
 # Daily LLM spend of web-started analyses (limits: LLM_BUDGET_PER_JOB_USD / LLM_BUDGET_PER_DAY_USD).
 LEDGER = SpendLedger(Path(os.environ.get("LLM_SPEND_FILE") or (UPLOAD_DIR.parent / "spend.json")))
 
@@ -109,7 +112,9 @@ async def _run_job(job: Job, root: Path, arxiv_id: str | None, use_llm: bool, re
 
             rep = await run_pipeline(root, paper_id=f"upload-{job.id}", arxiv_id=arxiv_id, use_llm=use_llm,
                                      review_max=review_max, progress=on_progress, partial=on_partial,
-                                     budget=server_budget(LEDGER) if use_llm else None)
+                                     budget=server_budget(LEDGER) if use_llm else None,
+                                     figures_dir=UPLOAD_DIR / job.id / "figures", assets=f"job:{job.id}",
+                                     render_latex=RENDER_LATEX)
             job.report_json = rep.model_dump_json()
             job.title = rep.paper.title
             out = UPLOAD_DIR / job.id / "report.json"
@@ -186,6 +191,25 @@ def job_status(job_id: str):
     return {"id": job.id, "status": job.status, "message": job.message, "stages": job.stages,
             "progress": job.progress, "error": job.error, "title": job.title,
             "has_partial": job.partial_json is not None, "has_report": job.report_json is not None}
+
+
+_FIG_NAME = __import__("re").compile(r"^[A-Za-z0-9._-]+\.(?:png|jpe?g|gif|svg)$")
+_FIG_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+              ".svg": "image/svg+xml"}
+
+
+@app.get("/api/jobs/{job_id}/figures/{name}")
+def job_figure(job_id: str, name: str):
+    if not job_id.isalnum() or not _FIG_NAME.match(name):
+        raise HTTPException(404, "图片不存在")
+    p = UPLOAD_DIR / job_id / "figures" / name
+    if not p.is_file():
+        raise HTTPException(404, "图片不存在")
+    ext = p.suffix.lower()
+    headers = {"Cache-Control": "public, max-age=86400"}
+    if ext == ".svg":   # uploaded SVG could carry script: never render it as a document
+        headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'"
+    return FileResponse(p, media_type=_FIG_TYPES[ext], headers=headers)
 
 
 @app.get("/api/jobs/{job_id}/report")

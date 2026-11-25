@@ -6,6 +6,8 @@
 
 - **结构提取**：识别定义 / 引理 / 命题 / 定理 / 推论等环境与公式，用 `\label`、`\ref`、`\eqref`、`\cite` 确定性地建立依赖；没有用 `\ref` 标注的隐式引用（“由上一引理可得”）交给大模型补全，图上用虚线区分。生成全文符号表。
 - **目标驱动的阅读路径**：点选一个结论，计算最小前置子图并按拓扑顺序给出阅读清单；“看懂证明”模式只要求读前置结论的陈述，“完全验证”模式递归读所有证明；列出论文默认读者已掌握的外部知识。
+- **读论文**：「导读」标签页给第一次读这篇论文的学生——一段话概括、需要的背景知识、逐节通俗解读、关键概念和自测问题；左侧可在依赖图和**思维导图**之间切换，导图由大模型按论文类型和领域惯例组织（定理类论文按“定义 → 引理 → 主定理 → 证明思路”，实验论文按“问题 → 方法 → 实验 → 结论 → 局限”），每个节点都链接回原文位置。
+- **论文里的图**：点开图表节点、或引用了某张图的条目，直接显示图片——取自论文源码中的图片文件（PDF / EPS 转为 PNG），TikZ、`picture` 和表格在有 LaTeX 的机器上用论文自己的导言区单独编译。
 - **审稿人体检**：作者智能体为每个关键步骤给出依据，审稿人智能体逐条质疑（前提条件是否验证、符号是否一致、结论是否有来源、是否循环），只输出双方无法达成一致或作者承认的问题，附原文位置与完整对抗记录。
 
 设计原则是**能确定的不交给大模型**：显式依赖、环境编号、证明归属、符号首次出现位置、未定义引用、循环依赖由程序解析得到，可复现；大模型只负责理解自然语言中的隐式引用和审稿对抗中的数学判断，并且它给出的每条推断都必须附带能在原文中逐字定位的引文，定位不到的直接丢弃。
@@ -50,11 +52,12 @@ uv run paper-checkup serve               # 打开 http://127.0.0.1:8000
 ```
 
 - **前端**：`.github/workflows/pages.yml` 在推送到 `main` 时构建 `frontend/`，用仓库变量 `API_BASE` 作为后端地址，并打包 `site/data/`。
-- **公开报告**：`uv run paper-checkup publish` 从完整报告生成 `site/data/`，去掉论文完整 LaTeX 源码（演示论文均为 arXiv 默认许可证，只授权 arXiv 分发全文），“查看原文”改为跳转 arXiv。完整报告 `frontend/public/data/` 不进仓库。
+- **公开报告**：`uv run paper-checkup publish` 把 `frontend/public/data/` 的报告和图片复制到 `site/data/`（这个目录进仓库）。按仓库所有者的决定，公开版本**包含论文 LaTeX 源码和图片**，页面上注明版权归原作者；注意演示论文都是 arXiv 默认许可证（`nonexclusive-distrib`），只授权 arXiv 分发全文。`publish --redact` 生成不含源码和图片的版本，“查看原文”改为跳转 arXiv。
 - **后端**（服务器的 `.env`）：
   - `ANALYZE_LLM_TOKEN`：运行大模型阶段需要的访问口令（不填口令仍可做确定性分析）；
   - `SERVE_STATIC=0`：只提供 API，不对外提供带全文的预置报告；
-  - `CORS_ORIGINS`：允许的前端域名，如 `https://<用户名>.github.io`。
+  - `CORS_ORIGINS`：允许的前端域名，如 `https://<用户名>.github.io`；
+  - `FIGURES_RENDER_LATEX=1`：网页上传的论文也用 LaTeX 编译 TikZ / 表格（默认关闭：会执行上传者的 TeX 代码，且服务器需要装 LaTeX）。没有它时，上传论文中的 PNG / JPG / PDF 图照常显示（PDF 用 `pdftoppm`、`gs` 或 macOS 自带的 `sips` 转换），EPS 需要 `gs`。
 - **常驻运行**（macOS）：`~/Library/LaunchAgents/com.paper-checkup.api.plist` 运行 `uv run paper-checkup serve --host 127.0.0.1 --port 8000`，
   公网入口用 `tailscale funnel --bg 8000`。日志在 `~/Library/Logs/paper-checkup.log`。
 
@@ -67,7 +70,8 @@ uv run paper-checkup analyze PATH [--out report.json] [--no-llm] [--review-max N
 uv run paper-checkup fetch 1212.0506                     # 下载 arXiv 源码到 papers/raw/
 uv run paper-checkup demo [--only ID ...] [--no-llm]     # 按 demo/papers.json 生成预置报告
 uv run paper-checkup path report.json thm-1 [--verify]   # 在终端打印阅读路径
-uv run paper-checkup publish                             # 生成公开部署用的 site/data（去掉论文全文）
+uv run paper-checkup augment [--only ID ...]             # 给已有预置报告补上图片和导读（不重跑审稿阶段，约 $0.01/篇）
+uv run paper-checkup publish [--redact]                  # 生成公开部署用的 site/data（--redact 去掉源码与图片）
 uv run paper-checkup serve [--port 8000]
 ```
 

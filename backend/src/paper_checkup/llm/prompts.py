@@ -411,3 +411,38 @@ NUMERIC_TASK = """## 你的角色：审稿人（数字核对）
 - unclear：无法从论文判断。
 对每一条给出 verdict、按统一标准的 severity（同一个量在摘要 / 结论与表格 / 正文中不一致、读者无法确定哪个是真实结果：至少 medium；涉及论文的核心论断：high；different 时填 info）、
 title（不超过 30 字）以及 comment（说明两处分别指什么、表格中是哪个数字、读者应以哪个为准）。"""
+
+
+# ---------------------------------------------------------------------------
+# Reading guide (for students): summary, mind map, per-section notes, concepts, prerequisites, questions
+# ---------------------------------------------------------------------------
+
+GUIDE_SCHEMA = obj({
+    "summary": S,
+    "audience": S,
+    "organization": S,
+    "mindmap": arr(obj({"key": S, "parent": nullable(S), "label": S, "note": S, "ids": arr(S)})),
+    "sections": arr(obj({"id": S, "summary": S, "key_points": arr(S)})),
+    "concepts": arr(obj({"term": S, "explanation": S, "ids": arr(S)})),
+    "prerequisites": arr(obj({"name": S, "why": S, "level": enum("basic", "intermediate", "advanced")})),
+    "questions": arr(obj({"question": S, "hint": S, "ids": arr(S)})),
+})
+
+GUIDE_TASK = """## 你的角色：导读老师
+读者是第一次读这篇论文的高校学生（高年级本科生或研究生），学过本领域的基础课程。请为他们写一份导读，帮助他们抓住论文主线、读懂关键部分。论文全文见上文，章节目录、核心论断和体检发现的风险点附在本任务之后。
+
+要求：
+1. 忠于原文：只概括论文写了什么，不编造论文中没有的结论、数字或实验。论文中有争议的地方，引用体检风险点的 id，不要自行下结论。
+2. 每一项尽量给出 ids，指向论文中讨论它的位置：章节 id（sec-…）、条目 id（thm-… / lem-… / def-… / as-… 等，来自全文中的【…】标记或下面的目录）、图表 id（fig-… / tab-… / alg-…）、公式 id（eq-…）或风险点 id。只能使用上文或下面出现过的 id。
+3. 用通俗、准确的中文；数学记号用 $…$ 包裹。id 只写在各项的 ids 字段里，不要写进 summary、label、explanation 等文字中（文字里可以写“定理 2”“表 2”“第 3.2 节”这样读者看得懂的名称）。
+
+各字段：
+- summary：3～5 句话说清论文要解决什么问题、做了什么、得到了什么。
+- audience：读懂这篇论文需要什么基础（一两句）。
+- organization：思维导图采用的组织方式，以及为什么适合这篇论文（一句话）。
+- mindmap：整篇论文的思维导图（根节点就是论文本身，不要输出根节点）。请按论文类型和该领域的惯例选择组织方式，例如数学 / 理论论文常按“背景与定义 → 关键引理 → 主要定理 → 证明思路 → 推论与应用”，实验 / 工程论文常按“研究问题 → 方法 → 实验设置 → 主要结果 → 局限”，也可以沿用论文自己的结构——以帮助学生看清主线为准。
+  每个节点：key（n1、n2…）、parent（上级节点的 key；一级分支填 null）、label（不超过 20 字）、note（一句话说明，可为空字符串）、ids。共 15～40 个节点，最多 4 层，一级分支 4～7 个。
+- sections：按章节顺序，为每个主要章节（id 用章节目录中的 sec-…）写通俗解读 summary（2～4 句）和 2～4 个要点 key_points。
+- concepts：6～15 个关键概念或记号：term、通俗解释 explanation、ids（定义或首次出现的位置）。
+- prerequisites：3～8 项需要预先了解的背景知识：name、why（论文哪里用到它）、level（basic / intermediate / advanced）。
+- questions：4～8 个帮助自测是否读懂的问题：question、hint（提示去看哪里、从什么角度想，不直接给出答案）、ids。"""

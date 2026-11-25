@@ -88,6 +88,15 @@ class StructFake(BaseProvider):
             ids = re.findall(r"id=(S\d+)", blocks[-1])
             return {"items": [{"id": i, "verdict": "inconsistent", "severity": "medium", "title": "精度数字不一致",
                                "comment": "摘要 81.2%，表与正文 80.4%"} for i in ids]}, {}
+        if schema_name == "guide":
+            return {"summary": "概括", "audience": "基础", "organization": "按内容", "mindmap": [
+                {"key": "n1", "parent": None, "label": "研究问题", "note": "", "ids": ["sec-1", "no-such-id"]},
+                {"key": "n2", "parent": "n1", "label": "子节点", "note": "说明", "ids": []},
+                {"key": "n3", "parent": "n9", "label": "悬空父节点", "note": "", "ids": []}],
+                "sections": [{"id": "sec-1", "summary": "第一节", "key_points": ["要点"]}, {"id": "bogus", "summary": "x", "key_points": []}],
+                "concepts": [{"term": "术语", "explanation": "解释", "ids": ["sec-1"]}],
+                "prerequisites": [{"name": "线性代数", "why": "到处用", "level": "basic"}],
+                "questions": [{"question": "问题？", "hint": "看第一节", "ids": ["sec-1"]}]}, {}
         if schema_name == "meta_review":
             ids = re.findall(r"^### (\S+?)（", "\n".join(blocks), re.M)
             return {"decisions": [{"risk_id": i, "action": "keep", "merge_into": None,
@@ -112,3 +121,23 @@ def test_structure_pipeline_with_fake_llm(monkeypatch, tmp_path):
     num = [r for r in rep.risks if r.category == "numeric" and r.id.startswith("S")]
     assert num and num[0].source == "review" and num[0].status == "unresolved" and num[0].severity == "medium"
     assert not any(name in ("author_steps", "reviewer_challenges") for _, name in fake.calls)
+    g = rep.guide
+    assert g and [m["key"] for m in g["mindmap"]] == ["n1", "n2", "n3"]
+    assert g["mindmap"][0]["ids"] == ["sec-1"]                 # unknown ids are dropped
+    assert g["mindmap"][2]["parent"] is None                   # dangling parent -> first-level branch
+    assert [x["id"] for x in g["sections"]] == ["sec-1"]
+    assert st["guide"].status == "done"
+
+
+def test_figure_images_from_source_files(tmp_path):
+    from paper_checkup.analysis.figures import build_figures
+
+    ctx = analyze_structure(FIXTURE)
+    figs = {f.id: f for f in build_figures(ctx, tmp_path / "figs", render_latex=False)}
+    fig = figs["fig-1"]
+    assert fig.images == ["fig-1-1.png"] and fig.source == "files"
+    assert (tmp_path / "figs" / "fig-1-1.png").read_bytes().startswith(b"\x89PNG")
+    assert figs["tab-1"].images == [] and "LaTeX" in (figs["tab-1"].note or "")   # tables need LaTeX
+    assert "sec-3" in figs["tab-1"].referenced_by                                  # Table~\\ref in Results
+    # Without an output directory the report still lists the floats (captions, references), without images.
+    assert {f.id for f in build_figures(ctx)} == {"tab-1", "fig-1"}

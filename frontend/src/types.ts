@@ -216,6 +216,44 @@ export interface Report {
   risks: Risk[];
   sources: Record<string, string>;
   stats: Record<string, number>;
+  figures?: FigureInfo[];
+  /** where figure images live: "figs/<paper>" (presets, under data/) or "job:<id>" (web analyses) */
+  assets?: string | null;
+  guide?: Guide | null;
+}
+
+export interface FigureInfo {
+  id: string; // fig-1 / tab-2 / alg-1 (the node id in structure mode)
+  kind: string; // figure | table | algorithm | listing
+  number?: string | null;
+  caption: string;
+  labels: string[];
+  loc?: Loc | null;
+  section_id?: string | null;
+  images: string[]; // file names under the report's asset directory
+  source?: string | null; // files | latex
+  note?: string | null;
+  referenced_by: string[];
+}
+
+export interface GuideMindNode {
+  key: string;
+  parent: string | null;
+  label: string;
+  note: string;
+  ids: string[];
+}
+
+export interface Guide {
+  summary: string;
+  audience: string;
+  organization: string;
+  mindmap: GuideMindNode[];
+  sections: { id: string; summary: string; key_points: string[] }[];
+  concepts: { term: string; explanation: string; ids: string[] }[];
+  prerequisites: { name: string; why: string; level: "basic" | "intermediate" | "advanced" }[];
+  questions: { question: string; hint: string; ids: string[] }[];
+  model?: string | null;
 }
 
 export interface PresetEntry {

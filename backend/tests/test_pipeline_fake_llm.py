@@ -66,6 +66,15 @@ class FakeProvider(BaseProvider):
             return {"proofs": []}, {}
         if schema_name == "prewarm":
             return {"ok": True}, {}
+        if schema_name == "guide":
+            return {"summary": "概括", "audience": "基础", "organization": "按内容", "mindmap": [
+                {"key": "n1", "parent": None, "label": "研究问题", "note": "", "ids": ["sec-1", "no-such-id"]},
+                {"key": "n2", "parent": "n1", "label": "子节点", "note": "说明", "ids": []},
+                {"key": "n3", "parent": "n9", "label": "悬空父节点", "note": "", "ids": []}],
+                "sections": [{"id": "sec-1", "summary": "第一节", "key_points": ["要点"]}, {"id": "bogus", "summary": "x", "key_points": []}],
+                "concepts": [{"term": "术语", "explanation": "解释", "ids": ["sec-1"]}],
+                "prerequisites": [{"name": "线性代数", "why": "到处用", "level": "basic"}],
+                "questions": [{"question": "问题？", "hint": "看第一节", "ids": ["sec-1"]}]}, {}
         if schema_name == "meta_review":
             ids = re.findall(r"^### (\S+?)（", "\n".join(blocks), re.M)
             return {"decisions": [{"risk_id": i, "action": "keep", "merge_into": None, "severity": "low",

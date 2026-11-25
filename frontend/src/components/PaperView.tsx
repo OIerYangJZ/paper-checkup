@@ -1,11 +1,14 @@
-import { FileText, LayoutDashboard, Route, ShieldAlert, Sigma } from "lucide-react";
+import { FileText, GitBranch, GraduationCap, LayoutDashboard, Network, Route, ShieldAlert, Sigma } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { buildIndex, readingPath, type PathMode } from "../lib/graph";
 import type { RenderCtx } from "../lib/latex";
 import { nodeName } from "../lib/labels";
 import type { Loc, Report } from "../types";
 import { PaperContext, type PaperContextValue, type Tab } from "./context";
+import { FigureModal } from "./FigureView";
 import { GraphPanel, type GraphFilters } from "./GraphPanel";
+import { GuidePanel } from "./GuidePanel";
+import { MindMap, outlineItems } from "./MindMap";
 import { NodeDetail } from "./NodeDetail";
 import { Overview } from "./Overview";
 import { ReadingPathPanel } from "./ReadingPathPanel";
@@ -35,7 +38,21 @@ function pickMainTarget(report: Report, idx: ReturnType<typeof buildIndex>): str
   return null;
 }
 
-const TABS: Tab[] = ["overview", "detail", "path", "risks", "symbols"];
+/** Theorem-mode reports keep float labels unnumbered ("Table"); the figure list knows their numbers. */
+function withFloatNumbers(report: Report): Report["labels"] {
+  const out = { ...report.labels };
+  const names: Record<string, string> = { figure: "Figure", table: "Table", algorithm: "Algorithm", listing: "Listing" };
+  for (const f of report.figures ?? []) {
+    if (!f.number) continue;
+    for (const lab of f.labels) {
+      const li = out[lab];
+      if (li && !/\d/.test(li.display)) out[lab] = { ...li, display: `${names[f.kind] ?? li.display} ${f.number}` };
+    }
+  }
+  return out;
+}
+
+const TABS: Tab[] = ["overview", "guide", "detail", "path", "risks", "symbols"];
 
 export function PaperView({ report, initialNode, initialTab }: { report: Report; initialNode?: string | null; initialTab?: string }) {
   const index = useMemo(() => buildIndex(report), [report]);
@@ -43,7 +60,7 @@ export function PaperView({ report, initialNode, initialTab }: { report: Report;
     () => ({
       macros: report.macros,
       textMacros: report.text_macros ?? {},
-      labels: report.labels,
+      labels: withFloatNumbers(report),
       citations: report.citations,
       theoremEnvs: report.theorem_envs ?? {},
       nodeNames: Object.fromEntries(report.nodes.map((n) => [n.id, nodeName(n)])),
@@ -57,6 +74,14 @@ export function PaperView({ report, initialNode, initialTab }: { report: Report;
   const [focusToken, setFocusToken] = useState(0);
   const [focusSet, setFocusSet] = useState<string[] | null>(null);
   const [source, setSource] = useState<Loc | null>(null);
+  const [leftView, setLeftView] = useState<"graph" | "mindmap">(() =>
+    new URLSearchParams(location.hash.split("?")[1] ?? "").get("view") === "mindmap" ? "mindmap" : "graph",
+  );
+  const [figureId, setFigureId] = useState<string | null>(null);
+  const mindItems = useMemo(
+    () => (report.guide?.mindmap?.length ? report.guide.mindmap : outlineItems(report)),
+    [report],
+  );
   const [pathTarget, setPathTargetState] = useState<string | null>(() => pickMainTarget(report, index));
   const [pathMode, setPathMode] = useState<PathMode>("understand");
   const [pathInferred, setPathInferred] = useState(true);
@@ -90,9 +115,10 @@ export function PaperView({ report, initialNode, initialTab }: { report: Report;
     const qs = new URLSearchParams();
     if (selected) qs.set("node", selected);
     if (tab !== "overview") qs.set("tab", tab);
+    if (leftView === "mindmap") qs.set("view", "mindmap");
     const q = qs.toString();
     history.replaceState(null, "", base + (q ? `?${q}` : ""));
-  }, [selected, tab]);
+  }, [selected, tab, leftView]);
 
   const ctx: PaperContextValue = useMemo(
     () => ({
@@ -110,6 +136,28 @@ export function PaperView({ report, initialNode, initialTab }: { report: Report;
         const r = report.risks.find((x) => x.id === rid);
         if (r) setFocusSet(r.node_ids);
       },
+      goTo: (id: string) => {
+        if (index.nodes.has(id)) {
+          selectNode(id, { tab: "detail", focus: true });
+          return;
+        }
+        const fig = (report.figures ?? []).find((f) => f.id === id);
+        if (fig) {
+          setFigureId(id);
+          return;
+        }
+        const risk = report.risks.find((r) => r.id === id);
+        if (risk) {
+          const first = risk.node_ids.find((x) => index.nodes.has(x));
+          if (first) selectNode(first, { tab: "detail", focus: true });
+          else setTab("risks");
+          setFocusSet(risk.node_ids);
+          return;
+        }
+        const sec = report.sections.find((x) => x.id === id);
+        if (sec?.loc) setSource(sec.loc);
+      },
+      openFigure: (id: string) => setFigureId(id),
     }),
     [report, index, renderCtx, selectNode],
   );
@@ -120,13 +168,28 @@ export function PaperView({ report, initialNode, initialTab }: { report: Report;
   return (
     <PaperContext.Provider value={ctx}>
       <div className="paper-view">
-        <GraphPanel filters={filters} setFilters={setFilters} selected={selected} path={graphPath} focusToken={focusToken} focusSet={focusSet} />
+        <div className="left-pane">
+          <div className="view-switch" role="tablist">
+            <button className={leftView === "graph" ? "on" : ""} onClick={() => setLeftView("graph")}>
+              <GitBranch size={14} /> 依赖图
+            </button>
+            <button className={leftView === "mindmap" ? "on" : ""} onClick={() => setLeftView("mindmap")}>
+              <Network size={14} /> 思维导图
+            </button>
+          </div>
+          {leftView === "graph" ? (
+            <GraphPanel filters={filters} setFilters={setFilters} selected={selected} path={graphPath} focusToken={focusToken} focusSet={focusSet} />
+          ) : (
+            <MindMap items={mindItems} generated={!!report.guide?.mindmap?.length} />
+          )}
+        </div>
         <aside className="side-panel">
           <nav className="tabs">
             {(
               [
                 ["overview", "概览", LayoutDashboard, null],
-                ["detail", "条目详情", FileText, null],
+                ["guide", "导读", GraduationCap, null],
+                ["detail", "详情", FileText, null],
                 ["path", "阅读路径", Route, null],
                 ["risks", "风险点", ShieldAlert, riskCount],
                 ["symbols", "符号表", Sigma, report.symbols.length],
@@ -141,6 +204,7 @@ export function PaperView({ report, initialNode, initialTab }: { report: Report;
           </nav>
           <div className="tab-body">
             {tab === "overview" ? <Overview onSection={(ids) => setFocusSet(ids)} /> : null}
+            {tab === "guide" ? <GuidePanel onShowMindmap={() => setLeftView("mindmap")} /> : null}
             {tab === "detail" ? <NodeDetail id={selected} /> : null}
             {tab === "path" ? (
               <ReadingPathPanel
@@ -160,6 +224,9 @@ export function PaperView({ report, initialNode, initialTab }: { report: Report;
           </div>
         </aside>
         {source ? <SourceViewer loc={source} onClose={() => setSource(null)} /> : null}
+        {figureId && (report.figures ?? []).some((f) => f.id === figureId) ? (
+          <FigureModal fig={(report.figures ?? []).find((f) => f.id === figureId)!} onClose={() => setFigureId(null)} />
+        ) : null}
       </div>
     </PaperContext.Provider>
   );

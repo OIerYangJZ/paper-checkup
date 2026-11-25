@@ -18,6 +18,14 @@ async function getJson<T>(url: string): Promise<T> {
   return r.json() as Promise<T>;
 }
 
+/** URL of a figure image of this report (null when the report carries no image directory). */
+export function assetUrl(report: Report, file: string): string | null {
+  const a = report.assets;
+  if (!a) return null;
+  if (a.startsWith("job:")) return `${API}/api/jobs/${a.slice(4)}/figures/${encodeURIComponent(file)}`;
+  return `${DATA}/${a}/${encodeURIComponent(file)}`;
+}
+
 export function loadPresets(): Promise<PresetEntry[]> {
   return getJson<PresetEntry[]>(`${DATA}/index.json`).catch(() => []);
 }

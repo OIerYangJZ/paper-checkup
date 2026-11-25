@@ -5,6 +5,7 @@ import type { PaperEdge } from "../types";
 import { Collapsible, Empty, KindChip, LocLink, NodeLink, Tag } from "./common";
 import { usePaper } from "./context";
 import { Latex } from "./Latex";
+import { FigureView } from "./FigureView";
 import { RiskCard } from "./RiskPanel";
 
 function EdgeItem({ e, dir }: { e: PaperEdge; dir: "pred" | "succ" }) {
@@ -52,6 +53,11 @@ export function NodeDetail({ id }: { id: string | null }) {
       </Empty>
     );
   const risks = index.risksByNode.get(n.id) ?? [];
+  const figures = report.figures ?? [];
+  const ownFigure = figures.find((f) => f.id === n.id);
+  const relatedFigures = figures.filter(
+    (f) => f.id !== n.id && (f.referenced_by.includes(n.id) || preds.some((e) => e.source === f.id)),
+  );
   const section = n.section_id ? index.sectionTitle.get(n.section_id) : undefined;
   const groups: [string, PaperEdge[]][] = [
     ["确定依赖", preds.filter((e) => e.kind === "explicit" && !e.source.startsWith("ext-"))],
@@ -153,7 +159,13 @@ export function NodeDetail({ id }: { id: string | null }) {
         </div>
       ))}
 
-      {n.kind === "external" ? (
+      {ownFigure ? (
+        <section className="nd-section">
+          <FigureView fig={ownFigure} />
+        </section>
+      ) : null}
+
+      {ownFigure ? null : n.kind === "external" ? (
         <section className="nd-section">
           <h3>{n.external?.source === "llm" ? "外部知识（大模型识别，论文默认读者已掌握）" : "被引用的文献"}</h3>
           <div className="statement">{n.statement}</div>
@@ -198,6 +210,16 @@ export function NodeDetail({ id }: { id: string | null }) {
           <Latex src={p.text} className="proof" />
         </Collapsible>
       ))}
+
+      {relatedFigures.length ? (
+        <Collapsible defaultOpen={relatedFigures.length <= 3} title={<>相关图表（{relatedFigures.length}）<span className="muted small"> · 正文中引用了它们</span></>}>
+          <div className="related-figures">
+            {relatedFigures.map((f) => (
+              <FigureView key={f.id} fig={f} compact />
+            ))}
+          </div>
+        </Collapsible>
+      ) : null}
 
       {risks.length ? (
         <section className="nd-section">
