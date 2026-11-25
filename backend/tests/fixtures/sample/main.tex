@@ -1,0 +1,92 @@
+\documentclass{amsart}
+\usepackage{amsmath,amsthm}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{claim}{Claim}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\numberwithin{equation}{section}
+\newcommand{\Zw}{\mathbb{Z}[\omega]}
+\newcommand{\wt}{\operatorname{wt}}
+\newcommand{\lemref}[1]{Lemma~\ref{#1}}
+
+\title{A Toy Paper on Weights}
+\author{Ada Example \and Bob Sample}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+We study the weight $\wt(u)$ of elements of $\Zw$.
+\end{abstract}
+
+\section{Introduction}
+Our main result is Theorem~\ref{thm:main}. The weight $\wt(u)$ will be defined later.
+
+\begin{theorem}\label{thm:main}
+Every element of $\Zw$ of weight $0$ is a unit.
+\end{theorem}
+
+% \label{commented-out-label}
+\iffalse
+\begin{lemma}\label{lem:hidden}
+This lemma is disabled.
+\end{lemma}
+\fi
+
+\input{sections/prelim}
+
+\section{Proof of Theorem~\ref{thm:main}}
+By \lemref{lem:bound} and Lemma 2.3, the weight satisfies \eqref{eq:wt-bound}.
+Moreover, the previous lemma gives the claim.
+\begin{lemma}\label{lem:inner}
+Weights are additive on orthogonal parts.
+\end{lemma}
+\begin{proof}
+Clearly this follows from Definition~\ref{def:weight} and \cite[Thm.~3]{KMM}.
+\end{proof}
+This completes the proof, using also Lemma~\ref{lem:missing}.
+
+\section{A cycle}
+\begin{lemma}\label{lem:a}
+Statement A.
+\end{lemma}
+\begin{proof}
+Follows from Lemma~\ref{lem:b}.
+\end{proof}
+
+\begin{lemma}\label{lem:b}
+Statement B.
+\end{lemma}
+\begin{proof}
+Follows from Lemma~\ref{lem:a}.
+\begin{claim}\label{cl:one}
+An inner claim.
+\end{claim}
+\begin{proof}
+Trivial.
+\end{proof}
+\end{proof}
+
+\begin{corollary}\label{cor:unproved}
+A corollary nobody proves.
+\end{corollary}
+
+\appendix
+\section{Extra}
+\begin{lemma}\label{lem:app}
+An appendix lemma with
+\begin{align}
+a &= b \label{eq:app1}\\
+c &= d \nonumber\\
+e &= f \label{eq:app2}
+\end{align}
+\end{lemma}
+\begin{proof}
+See \eqref{eq:app2} and Theorem~\ref{thm:main}.
+\end{proof}
+
+\begin{thebibliography}{9}
+\bibitem[KMM13]{KMM} V. Kliuchnikov, D. Maslov, M. Mosca. \newblock Fast and efficient exact synthesis. \newblock QIC, 2013.
+\end{thebibliography}
+\end{document}

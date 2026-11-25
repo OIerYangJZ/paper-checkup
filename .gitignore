@@ -1,0 +1,16 @@
+.env
+.DS_Store
+node_modules/
+frontend/dist/
+backend/.venv/
+backend/.cache/
+backend/data/
+__pycache__/
+*.pyc
+.pytest_cache/
+# Downloaded third-party LaTeX sources (re-fetch with `paper-checkup fetch` / `demo`)
+papers/raw/
+
+# Full preset reports (contain the papers' complete LaTeX sources); the public copy lives in site/data
+frontend/public/data/
+*.tsbuildinfo

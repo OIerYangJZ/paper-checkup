@@ -1,0 +1,22 @@
+{
+  "papers": [
+    {
+      "id": "giles-selinger-2013",
+      "arxiv_id": "1212.0506",
+      "blurb": "多比特 Clifford+T 电路的精确合成：一个矩阵可由 Clifford+T 电路（允许一个辅助比特）精确实现，当且仅当其元素属于环 Z[1/√2, i]。结构紧凑，适合看清“定义 → 引理 → 主定理”的完整链条。",
+      "review_max": 20
+    },
+    {
+      "id": "kliuchnikov-maslov-mosca-2013",
+      "arxiv_id": "1206.5236",
+      "blurb": "单比特 Clifford+T 酉矩阵的快速精确合成算法。LyX 导出的源码，环境名和证明标注都不规范，可以看到程序如何确定性地判断证明归属。",
+      "review_max": 20
+    },
+    {
+      "id": "ross-selinger-2016",
+      "arxiv_id": "1403.2975",
+      "blurb": "z 旋转的最优无辅助比特 Clifford+T 逼近（gridsynth）。124 个条目、18 个源文件，附录中大量“Proof of …”章节，适合体验阅读路径：只关心主定理时到底要读哪些部分。",
+      "review_max": 40
+    }
+  ]
+}

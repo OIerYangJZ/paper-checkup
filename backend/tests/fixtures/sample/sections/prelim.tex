@@ -1,0 +1,24 @@
+\section{Preliminaries}\label{sec:prelim}
+Let $\omega = e^{i\pi/4}$ denote the eighth root of unity.
+
+\begin{definition}[Weight]\label{def:weight}
+For $u\in\Zw$, the \emph{weight} of $u$ is $\wt(u) := \lfloor \log_2 |u|^2 \rfloor$.
+\end{definition}
+
+\begin{equation}\label{eq:wt-bound}
+\wt(u) \le 2\,\wt(v).
+\end{equation}
+
+\begin{lemma}\label{lem:bound}
+For all $u$ of positive weight, \eqref{eq:wt-bound} holds.
+\end{lemma}
+\begin{proof}
+Use Definition~\ref{def:weight}. It is easy to see that the bound holds.
+\end{proof}
+
+\begin{lemma}\label{lem:second}
+The weight is invariant under multiplication by $\omega$.
+\end{lemma}
+\begin{proof}
+Immediate from the definition of weight.
+\end{proof}
