@@ -141,3 +141,27 @@ def test_figure_images_from_source_files(tmp_path):
     assert "sec-3" in figs["tab-1"].referenced_by                                  # Table~\\ref in Results
     # Without an output directory the report still lists the floats (captions, references), without images.
     assert {f.id for f in build_figures(ctx)} == {"tab-1", "fig-1"}
+
+
+def test_uploaded_latex_cannot_read_outside_files(tmp_path):
+    """TeX's paranoid mode lets absolute paths through; the OS sandbox must stop them (macOS + pdflatex only)."""
+    import pytest
+
+    from paper_checkup.analysis import figures as F
+
+    if not F.sandbox_available() or not F._tool("pdflatex"):
+        pytest.skip("needs macOS sandbox-exec and pdflatex")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOPSECRET")
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    (paper / "local.tex").write_text("LOCALOK")
+    (paper / "main.tex").write_text(
+        "\\documentclass{article}\\begin{document}\n"
+        f"\\begin{{table}}\\caption{{a}}\\begin{{tabular}}{{l}}\\input{{{secret}}}\\end{{tabular}}\\end{{table}}\n"
+        "\\begin{table}\\caption{b}\\begin{tabular}{l}\\input{local}\\end{tabular}\\end{table}\n"
+        "\\end{document}\n")
+    ctx = analyze_structure(paper)
+    figs = {f.id: f for f in F.build_figures(ctx, tmp_path / "out", render_latex=True, sandbox=True)}
+    assert figs["tab-1"].images == []                 # the absolute path outside the paper is not readable
+    assert figs["tab-2"].images == ["tab-2.png"]      # the paper's own files are

@@ -30,6 +30,33 @@ MAX_FLOATS = 80
 COMPILE_TIMEOUT = 60
 
 
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+
+
+def sandbox_available() -> bool:
+    return Path(SANDBOX_EXEC).exists()
+
+
+def _sandboxed(args: list[str], read: list[str], write: list[str]) -> list[str]:
+    """Run `args` under macOS's sandbox: no network, writes only to `write`, and nothing under /Users or the
+    temp areas can be read except `read` (TeX's own paranoid mode still lets absolute paths through)."""
+    q = lambda p: '"' + os.path.realpath(p).replace("\\", "\\\\").replace('"', '\\"') + '"'
+    prof = ("(version 1)(allow default)(deny network*)(deny file-write*)"
+            "(allow file-write* " + " ".join(f"(subpath {q(w)})" for w in write) + ' (literal "/dev/null"))'
+            '(deny file-read* (subpath "/Users") (subpath "/private/var/folders") (subpath "/private/tmp") (subpath "/Volumes"))'
+            "(allow file-read* " + " ".join(f"(subpath {q(r)})" for r in read + write) + ")")
+    return [SANDBOX_EXEC, "-p", prof] + args
+
+
+def _tex_env(src: str, root: Path, home: str) -> dict:
+    """A minimal environment for TeX on possibly untrusted input: no inherited variables (API keys live in the
+    server's environment), no shell escape, and kpathsea's paranoid mode for reading and writing (no absolute
+    paths, no '..', no dot files: only files of the paper itself and of the TeX installation can be read)."""
+    return {"PATH": os.environ.get("PATH", "/usr/bin:/bin") + ":/Library/TeX/texbin:/opt/homebrew/bin:/usr/local/bin",
+            "HOME": home, "TMPDIR": home, "LANG": "C", "TEXINPUTS": f"{src}//:{root}//:", "BIBINPUTS": f"{src}//:",
+            "openin_any": "p", "openout_any": "p", "shell_escape": "f"}
+
+
 def _tool(name: str) -> str | None:
     p = shutil.which(name)
     if p:
@@ -41,6 +68,8 @@ def _tool(name: str) -> str | None:
 
 
 def _run(args: list[str], cwd: Path | None = None, env: dict | None = None, timeout: int = COMPILE_TIMEOUT) -> bool:
+    if env is None:   # converters run on uploaded files: do not hand them the server's environment either
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": tempfile.gettempdir(), "LANG": "C"}
     try:
         r = subprocess.run(args, cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            stdin=subprocess.DEVNULL, timeout=timeout)
@@ -49,27 +78,31 @@ def _run(args: list[str], cwd: Path | None = None, env: dict | None = None, time
         return False
 
 
-def _pdf_to_png(src: Path, out: Path, dpi: int = 160) -> bool:
+def _wrap(args: list[str], box: tuple[list[str], list[str]] | None) -> list[str]:
+    return _sandboxed(args, *box) if box else args
+
+
+def _pdf_to_png(src: Path, out: Path, dpi: int = 160, box=None) -> bool:
     pdftoppm = _tool("pdftoppm")
-    if pdftoppm and _run([pdftoppm, "-png", "-r", str(dpi), "-f", "1", "-l", "1", "-singlefile", str(src),
-                          str(out.with_suffix(""))]):
+    if pdftoppm and _run(_wrap([pdftoppm, "-png", "-r", str(dpi), "-f", "1", "-l", "1", "-singlefile", str(src),
+                                str(out.with_suffix(""))], box)):
         return out.exists()
     gs = _tool("gs")
-    if gs and _run([gs, "-dSAFER", "-dBATCH", "-dNOPAUSE", "-dQUIET", "-sDEVICE=png16m", f"-r{dpi}",
-                    "-dFirstPage=1", "-dLastPage=1", "-dTextAlphaBits=4", "-dGraphicsAlphaBits=4",
-                    f"-sOutputFile={out}", str(src)]):
+    if gs and _run(_wrap([gs, "-dSAFER", "-dBATCH", "-dNOPAUSE", "-dQUIET", "-sDEVICE=png16m", f"-r{dpi}",
+                          "-dFirstPage=1", "-dLastPage=1", "-dTextAlphaBits=4", "-dGraphicsAlphaBits=4",
+                          f"-sOutputFile={out}", str(src)], box)):
         return out.exists()
     sips = _tool("sips")   # macOS built-in; renders at the PDF's own size
-    if sips and _run([sips, "-s", "format", "png", str(src), "--out", str(out)]):
+    if sips and _run(_wrap([sips, "-s", "format", "png", str(src), "--out", str(out)], box)):
         return out.exists()
     return False
 
 
-def _eps_to_png(src: Path, out: Path, dpi: int = 160) -> bool:
+def _eps_to_png(src: Path, out: Path, dpi: int = 160, box=None) -> bool:
     gs = _tool("gs")
-    return bool(gs) and _run([gs, "-dSAFER", "-dBATCH", "-dNOPAUSE", "-dQUIET", "-dEPSCrop", "-sDEVICE=png16m",
-                              f"-r{dpi}", "-dTextAlphaBits=4", "-dGraphicsAlphaBits=4", f"-sOutputFile={out}",
-                              str(src)]) and out.exists()
+    return bool(gs) and _run(_wrap([gs, "-dSAFER", "-dBATCH", "-dNOPAUSE", "-dQUIET", "-dEPSCrop", "-sDEVICE=png16m",
+                                    f"-r{dpi}", "-dTextAlphaBits=4", "-dGraphicsAlphaBits=4", f"-sOutputFile={out}",
+                                    str(src)], box)) and out.exists()
 
 
 def _graphics_dirs(preamble: str) -> list[str]:
@@ -107,7 +140,7 @@ def _strip_cmd(body: str, cmd: str) -> str:
 
 
 def _compile_float(root: Path, main_dir: Path, preamble: str, body: str, out: Path, defs: str = "",
-                   aux: str = "") -> bool:
+                   aux: str = "", timeout: int = COMPILE_TIMEOUT, sandbox: bool = False) -> bool:
     """Compile the float body on its own page with the paper's preamble, crop, rasterize."""
     pdflatex = _tool("pdflatex")
     if not pdflatex:
@@ -116,23 +149,28 @@ def _compile_float(root: Path, main_dir: Path, preamble: str, body: str, out: Pa
     doc = (preamble.rstrip() + "\n\\begin{document}\n" + defs + "\n\\pagestyle{empty}\\thispagestyle{empty}\n"
            "\\noindent\\begin{minipage}{\\textwidth}\\centering\n" + body + "\n\\end{minipage}\n\\end{document}\n")
     with tempfile.TemporaryDirectory(prefix="pc-fig-") as td:
+        td = os.path.realpath(td)
+        box = ([str(root)], [td]) if sandbox else None
         tex = Path(td) / "fig.tex"
         tex.write_text(doc)
         if aux:
             (Path(td) / "fig.aux").write_text(aux)   # citation numbers, so \\cite does not print [?]
         src = str(root / main_dir)
-        env = dict(os.environ, TEXINPUTS=f"{src}//:{root}//:", BIBINPUTS=f"{src}//:", openout_any="p",
-                   shell_escape="f")
-        ok = _run([pdflatex, "-interaction=nonstopmode", "-halt-on-error", "-no-shell-escape",
-                   "-output-directory", td, str(tex)], cwd=Path(td), env=env)
+        env = _tex_env(src, root, td)
+        ok = _run(_wrap([pdflatex, "-interaction=nonstopmode", "-halt-on-error", "-no-shell-escape",
+                         "-output-directory", td, str(tex)], box), cwd=Path(td), env=env, timeout=timeout)
         pdf = Path(td) / "fig.pdf"
         if not ok or not pdf.exists():
             return False
         pdfcrop = _tool("pdfcrop")
         cropped = Path(td) / "fig-crop.pdf"
-        if pdfcrop and _run([pdfcrop, "--margins", "6", str(pdf), str(cropped)], cwd=Path(td), env=env) and cropped.exists():
+        if pdfcrop and _run(_wrap([pdfcrop, "--margins", "6", str(pdf), str(cropped)], box), cwd=Path(td), env=env,
+                            timeout=timeout) and cropped.exists():
             pdf = cropped
-        return _pdf_to_png(pdf, out, dpi=180)
+        if not _pdf_to_png(pdf, Path(td) / "fig.png", dpi=180, box=box):
+            return False
+        shutil.copyfile(Path(td) / "fig.png", out)
+        return True
 
 
 def _raw_preamble(ctx) -> str | None:
@@ -179,8 +217,16 @@ def _raw_float_body(ctx, f) -> str | None:
     return seg[b.end():e[-1].start()]
 
 
-def build_figures(ctx, out_dir: Path | None = None, render_latex: bool = False) -> list[FigureInfo]:
-    """FigureInfo for every float; with out_dir, also write the images there."""
+def build_figures(ctx, out_dir: Path | None = None, render_latex: bool = False,
+                  latex_budget_s: float | None = None, sandbox: bool = False) -> list[FigureInfo]:
+    """FigureInfo for every float; with out_dir, also write the images there.
+
+    latex_budget_s caps the total time spent compiling floats (web uploads); None means no cap.
+    sandbox=True (untrusted uploads): every converter and TeX run inside the OS sandbox; without one, uploaded
+    LaTeX is not compiled at all."""
+    import time
+
+    started = time.monotonic()
     p, text = ctx.paper, ctx.paper.text
     root = Path(ctx.root).resolve()
     main_dir = Path(ctx.flat.main_file).parent
@@ -194,7 +240,9 @@ def build_figures(ctx, out_dir: Path | None = None, render_latex: bool = False) 
         for k, c in ctx.gb.citations.items() if re.fullmatch(r"[^{}\\%#]+", k))
     if out_dir is not None:
         out_dir.mkdir(parents=True, exist_ok=True)
-    latex_ok = render_latex and raw_preamble is not None and _tool("pdflatex") is not None
+    latex_ok = render_latex and raw_preamble is not None and _tool("pdflatex") is not None and \
+        (not sandbox or sandbox_available())
+    conv_box = ([str(root)], [str(out_dir)]) if sandbox and sandbox_available() and out_dir is not None else None
 
     # Which nodes refer to which float (\ref to a float label, inside a node's region).
     label_float = {lab: f.id for f in p.floats for lab in f.labels}
@@ -234,19 +282,24 @@ def build_figures(ctx, out_dir: Path | None = None, render_latex: bool = False) 
                     info.images.append(dst.name)
                     continue
                 dst = out_dir / f"{f.id}-{k}.png"
-                ok = _pdf_to_png(src, dst) if ext == ".pdf" else _eps_to_png(src, dst)
+                ok = _pdf_to_png(src, dst, box=conv_box) if ext == ".pdf" else _eps_to_png(src, dst, box=conv_box)
                 if ok:
                     info.images.append(dst.name)
                 else:
                     notes.append(f"{src.name}：服务器没有可用的 {'PDF' if ext == '.pdf' else 'EPS'} 转换工具")
             if info.images:
                 info.source = "files"
-        if not info.images and latex_ok:
+        over_budget = latex_budget_s is not None and time.monotonic() - started > latex_budget_s
+        if not info.images and latex_ok and over_budget:
+            notes.append("本次分析的 LaTeX 编译时间已用完，其余浮动体没有编译")
+        if not info.images and latex_ok and not over_budget:
             dst = out_dir / f"{f.id}.png"
+            per = COMPILE_TIMEOUT if latex_budget_s is None else 30
             raw_body = _raw_float_body(ctx, f)
             # Original text first (comment-only lines matter inside macro arguments), then the flattened text.
             attempts = ([(raw_preamble, raw_body)] if raw_body is not None else []) + [(raw_preamble, body)]
-            if any(_compile_float(root, main_dir, pre, b, dst, body_defs, aux) for pre, b in attempts):
+            if any(_compile_float(root, main_dir, pre, b, dst, body_defs, aux, timeout=per, sandbox=sandbox)
+                   for pre, b in attempts):
                 info.images.append(dst.name)
                 info.source = "latex"
                 notes = []

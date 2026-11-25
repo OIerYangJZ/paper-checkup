@@ -57,7 +57,7 @@ uv run paper-checkup serve               # 打开 http://127.0.0.1:8000
   - `ANALYZE_LLM_TOKEN`：运行大模型阶段需要的访问口令（不填口令仍可做确定性分析）；
   - `SERVE_STATIC=0`：只提供 API，不对外提供带全文的预置报告；
   - `CORS_ORIGINS`：允许的前端域名，如 `https://<用户名>.github.io`；
-  - `FIGURES_RENDER_LATEX=1`：网页上传的论文也用 LaTeX 编译 TikZ / 表格（默认关闭：会执行上传者的 TeX 代码，且服务器需要装 LaTeX）。没有它时，上传论文中的 PNG / JPG / PDF 图照常显示（PDF 用 `pdftoppm`、`gs` 或 macOS 自带的 `sips` 转换），EPS 需要 `gs`。
+  - `FIGURES_RENDER_LATEX=1`：网页上传的论文也用 LaTeX 编译 TikZ / 表格 / 算法（需要 `pdflatex`、`pdfcrop`，如 `brew install texlive ghostscript`）。上传的 TeX 代码不可信，因此只在 macOS 沙箱（`sandbox-exec`）里运行：除本次上传的源码外读不到 `/Users` 与临时目录下的任何文件、不能联网、只能写自己的临时目录；同时禁用 shell escape、不继承服务的环境变量（API key）、单次编译 30 秒、每次上传共 `FIGURES_LATEX_BUDGET_S`（默认 120）秒。没有沙箱的机器上不会编译上传的 LaTeX。注意 TeX 自己的 `openin_any=p` 并不阻止读取绝对路径，不能单靠它。不开启时，上传论文中的 PNG / JPG / PDF / EPS 图照常显示（PDF 用 `pdftoppm`、`gs` 或 macOS 自带的 `sips` 转换，EPS 需要 `gs`）。
 - **常驻运行**（macOS）：`~/Library/LaunchAgents/com.paper-checkup.api.plist` 运行 `uv run paper-checkup serve --host 127.0.0.1 --port 8000`，
   公网入口用 `tailscale funnel --bg 8000`。日志在 `~/Library/Logs/paper-checkup.log`。
 

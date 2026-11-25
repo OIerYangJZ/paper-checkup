@@ -58,8 +58,10 @@ LLM_TOKEN = os.environ.get("ANALYZE_LLM_TOKEN", "").strip()
 SERVE_STATIC = os.environ.get("SERVE_STATIC", "1").strip().lower() not in ("0", "false", "no", "off")
 CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
 # Figures of uploads are converted with the paper's own image files (PDF via pdftoppm / gs / sips, EPS via gs).
-# Compiling uploaded LaTeX (TikZ, tables) is off unless FIGURES_RENDER_LATEX=1: it runs untrusted TeX code.
+# Compiling uploaded LaTeX (TikZ, tables) is off unless FIGURES_RENDER_LATEX=1: it runs untrusted TeX code, so it
+# only happens inside the macOS sandbox (no reads under /Users except the upload, no network, writes to a temp dir).
 RENDER_LATEX = os.environ.get("FIGURES_RENDER_LATEX", "0").strip().lower() in ("1", "true", "yes", "on")
+LATEX_BUDGET_S = float(os.environ.get("FIGURES_LATEX_BUDGET_S", "120") or 120)   # total compile time per upload
 # Daily LLM spend of web-started analyses (limits: LLM_BUDGET_PER_JOB_USD / LLM_BUDGET_PER_DAY_USD).
 LEDGER = SpendLedger(Path(os.environ.get("LLM_SPEND_FILE") or (UPLOAD_DIR.parent / "spend.json")))
 
@@ -114,7 +116,7 @@ async def _run_job(job: Job, root: Path, arxiv_id: str | None, use_llm: bool, re
                                      review_max=review_max, progress=on_progress, partial=on_partial,
                                      budget=server_budget(LEDGER) if use_llm else None,
                                      figures_dir=UPLOAD_DIR / job.id / "figures", assets=f"job:{job.id}",
-                                     render_latex=RENDER_LATEX)
+                                     render_latex=RENDER_LATEX, latex_budget_s=LATEX_BUDGET_S, sandbox=True)
             job.report_json = rep.model_dump_json()
             job.title = rep.paper.title
             out = UPLOAD_DIR / job.id / "report.json"

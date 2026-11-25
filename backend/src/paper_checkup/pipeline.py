@@ -115,7 +115,8 @@ async def run_pipeline(root: Path, *, paper_id: str | None = None, arxiv_id: str
                        use_llm: bool = True, review_max: int | None = None, config: LLMConfig | None = None,
                        progress: ProgressCb | None = None, partial: Callable[[Report], None] | None = None,
                        use_cache: bool = True, budget: Budget | None = None, figures_dir: Path | None = None,
-                       assets: str | None = None, render_latex: bool = False) -> Report:
+                       assets: str | None = None, render_latex: bool = False,
+                       latex_budget_s: float | None = None, sandbox: bool = False) -> Report:
     cfg = config or LLMConfig.from_env()
     llm_on = use_llm and cfg.enabled
     day_note = None
@@ -132,7 +133,8 @@ async def run_pipeline(root: Path, *, paper_id: str | None = None, arxiv_id: str
     ctx = analyze_structure(Path(root), paper_id=paper_id, arxiv_id=arxiv_id)
     if figures_dir is not None:
         tracker.emit("提取论文中的图…")
-        ctx.extra["figures"] = await asyncio.to_thread(build_figures, ctx, figures_dir, render_latex)
+        ctx.extra["figures"] = await asyncio.to_thread(build_figures, ctx, figures_dir, render_latex, latex_budget_s,
+                                                       sandbox)
         ctx.extra["assets"] = assets
     structure = ctx.gb.mode == "structure"
     if structure:
