@@ -831,6 +831,129 @@ async def stage_numeric_check(ctx: AnalysisContext, client: LLMClient, progress:
 
 
 # ---------------------------------------------------------------------------
+# Structure mode: derivation review (sections dense in displayed equations)
+# ---------------------------------------------------------------------------
+
+MAX_DERIVATIONS = 12
+
+
+def select_derivation_targets(ctx: AnalysisContext, max_targets: int = MAX_DERIVATIONS) -> list[str]:
+    """Sections whose own text holds a derivation: at least 3 displayed formulas (outside floats); ranked by the
+    number of displays, numbered equations, and equation references into or within the section."""
+    if ctx.gb.mode != "structure":
+        return []
+    floats = [(f.env.begin, f.env.end) for f in ctx.paper.floats]
+    eq_nodes = [n for n in ctx.nodes.values() if n.kind == "equation"]
+    cands = []
+    for nid, (a, z) in ctx.gb.unit_range.items():
+        n = ctx.nodes.get(nid)
+        if n is None or n.kind != "section" or nid == "abstract":
+            continue
+        disp = [m for m in ctx.paper.math if m.display and a <= m.start < z and not any(x <= m.start < y for x, y in floats)]
+        if len(disp) < 3:
+            continue
+        inside = {e.id for e in eq_nodes if e.id in ctx.gb.start_of and a <= ctx.gb.start_of[e.id] < z}
+        eq_refs = sum(1 for e in ctx.edges if e.source.startswith("eq-") and (e.target == nid or e.target in inside))
+        score = len(disp) + 2 * len(inside) + eq_refs
+        cands.append((score, n.order, nid))
+    cands.sort(key=lambda t: (-t[0], t[1]))
+    return [nid for _, _, nid in cands[:max_targets]]
+
+
+def derivation_context(ctx: AnalysisContext, sid: str) -> str:
+    n = ctx.nodes[sid]
+    a, z = ctx.gb.unit_range[sid]
+    title = f" {n.title}" if n.title else ""
+    out = [f"# 待审查推导：[{sid}] {ctx.node_name(sid)}{title}（在全文中以【{sid} · …】标记开头）",
+           "## 本节原文（行号为源文件行号）", numbered(ctx, a, z, max_chars=24000)]
+    inside = {e for e in ctx.nodes if e.startswith("eq-") and e in ctx.gb.start_of and a <= ctx.gb.start_of[e] < z}
+    used = []
+    for e in ctx.edges:
+        if e.source.startswith("eq-") and e.source not in inside and (e.target == sid or e.target in inside) \
+                and e.source in ctx.nodes and e.source not in used:
+            used.append(e.source)
+    if used:
+        out.append("## 本节用到的其他公式")
+        for eid in used:
+            m = ctx.nodes[eid]
+            where = ctx.node_name(m.section_id) if m.section_id in ctx.nodes else ""
+            out.append(f"- [{eid}] {ctx.node_name(eid)}（{where}）：{_clip(m.statement, 600)}")
+    syms = [s for s in ctx.symbols if s.id in set(n.symbols_used)][:25]
+    if syms:
+        out.append("## 相关记号")
+        for s_ in syms:
+            out.append(f"- {s_.latex}：{s_.meaning or (s_.macro_expansion or '')}")
+    return "\n".join(out)
+
+
+async def _review_derivation(ctx: AnalysisContext, client: LLMClient, sid: str, paper: str) -> list[Risk]:
+    system = _system(ctx, client)
+    node = ctx.nodes[sid]
+    dc = derivation_context(ctx, sid)
+    author_ctx = P.DERIVATION_AUTHOR_ROLE + "\n\n" + dc
+    reviewer_ctx = P.DERIVATION_REVIEWER_ROLE + "\n\n" + dc
+    a1 = await client.json("author", system, [paper, author_ctx, P.DERIVATION_AUTHOR_TASK], P.STEPS_SCHEMA,
+                           "derivation_steps", max_tokens=8000)
+    steps_txt = json.dumps(a1, ensure_ascii=False, indent=1)
+    r1 = await client.json("reviewer", system,
+                           [paper, reviewer_ctx, "## 作者对推导步骤的说明\n" + steps_txt, P.DERIVATION_REVIEWER_TASK],
+                           P.DERIVATION_CHALLENGES_SCHEMA, "derivation_challenges", max_tokens=8000)
+    challenges = [c for c in r1.get("challenges", []) if c.get("concern")]
+    node.review = {"status": "passed", "kind": "derivation", "steps": len(a1.get("steps", [])),
+                   "challenges": len(challenges), "unresolved": 0}
+    if not challenges:
+        return []
+    ch_txt = json.dumps({"challenges": challenges}, ensure_ascii=False, indent=1)
+    a2 = await client.json("author", system,
+                           [paper, author_ctx, "## 你之前给出的步骤说明\n" + steps_txt, "## 审稿人的质疑\n" + ch_txt,
+                            P.DERIVATION_REBUTTAL_TASK], P.REBUTTAL_SCHEMA, "derivation_rebuttal", max_tokens=8000)
+    resp_txt = json.dumps(a2, ensure_ascii=False, indent=1)
+    r2 = await client.json("reviewer", system,
+                           [paper, reviewer_ctx, "## 作者对推导步骤的说明\n" + steps_txt, "## 你提出的质疑\n" + ch_txt,
+                            "## 作者的回应\n" + resp_txt, P.DERIVATION_VERDICT_TASK], P.VERDICT_SCHEMA,
+                           "derivation_verdict", max_tokens=8000)
+    a, z = ctx.gb.unit_range[sid]
+    risks = _debate_risks(ctx, sid, a1, challenges, a2, r2, [(a, z), (ctx.paper.body_start, ctx.paper.body_end)],
+                          step_label="作者 · 推导依据")
+    substantive = [r for r in risks if r.status != "minor"]
+    node.review.update({"status": "issues" if substantive else "passed", "unresolved": len(substantive),
+                        "minor": len(risks) - len(substantive)})
+    return risks
+
+
+async def stage_derivation_review(ctx: AnalysisContext, client: LLMClient, max_targets: int = MAX_DERIVATIONS,
+                                  progress: Progress = _noop) -> dict:
+    targets = select_derivation_targets(ctx, max_targets)
+    paper = paper_prefix(ctx)
+    done = budget_skipped = 0
+    out: list[Risk] = []
+
+    async def run(sid):
+        nonlocal done, budget_skipped
+        try:
+            rs = await _review_derivation(ctx, client, sid, paper)
+        except BudgetExceeded as e:
+            ctx.nodes[sid].review = {"status": "skipped", "kind": "derivation", "reason": "budget", "error": str(e)}
+            budget_skipped += 1
+            rs = []
+        except LLMError as e:
+            log.warning("推导审查失败 %s：%s", sid, e)
+            ctx.nodes[sid].review = {"status": "error", "kind": "derivation", "error": str(e)[:200]}
+            rs = []
+        done += 1
+        progress("derivation_review", done, len(targets), f"推导审查 {done}/{len(targets)}：{ctx.node_name(sid)}")
+        return rs
+
+    for rs in await asyncio.gather(*(run(t) for t in targets)):
+        out.extend(rs)
+    for i, r in enumerate(out):
+        r.id = f"D{i + 1}"
+    ctx.risks.extend(out)
+    return {"targets": len(targets) - budget_skipped, "budget_skipped": budget_skipped,
+            "risks": sum(1 for r in out if r.status != "minor"), "minor": sum(1 for r in out if r.status == "minor")}
+
+
+# ---------------------------------------------------------------------------
 # Post-processing: external-knowledge consolidation and meta-review
 # ---------------------------------------------------------------------------
 

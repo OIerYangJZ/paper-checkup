@@ -20,13 +20,60 @@ GAP_PHRASES = [
 ]
 _GAP_RE = re.compile(r"\b(?:" + "|".join(GAP_PHRASES) + r")\b", re.I)
 
-# Numeric cross-check (structure mode): a metric next to a number, e.g. "BLEU score of $41.0$", "28.4 BLEU".
-_METRIC_RE = re.compile(
-    r"\b(BLEU|ROUGE(?:-[12L])?|METEOR|chrF|F1|F-?(?:score|measure)|accuracy|precision|recall|perplexit(?:y|ies)|PPL|"
-    r"error\s+rate|WER|CER|AUC|mAP|top-?[15](?:\s+accuracy)?|exact\s+match|FID|PSNR|SSIM|RMSE|MAE|MSE|"
-    r"speed-?up|throughput|latency|FLOPs?|parameters|params)\b", re.I)
-# Not part of a name such as "top-1", "ResNet-50", "ImageNet-1K", nor a sub/superscript.
-_VALUE_RE = re.compile(r"(?<![\w.\\^_{-])(\d+\.\d+|\d+)(?:\s*(\\?%))?(?![\w.])")
+# Numeric cross-check (structure mode): a metric, statistic or unit next to a number, e.g. "BLEU score of $41.0$",
+# "OR 2.1 (95% CI 1.4–3.0)", "p = 0.03", "5.1$\\sigma$", "125.1 GeV", "yield of 82%".
+_METRIC_WORDS = (  # case-insensitive
+    # machine learning
+    r"BLEU|ROUGE(?:-[12L])?|METEOR|chrF|F1|F-?(?:score|measure)|accuracy|precision|recall|perplexit(?:y|ies)|PPL|"
+    r"error\s+rates?|WER|CER|mAP|top-?[15](?:\s+accuracy)?|exact\s+match|FID|PSNR|SSIM|RMSE|MAE|MSE|"
+    r"speed-?up|throughput|latency|FLOPs?|parameters|params|"
+    # statistics / medicine / social science
+    r"p[- ]?values?|odds\s+ratios?|hazard\s+ratios?|relative\s+risks?|risk\s+ratios?|confidence\s+intervals?|"
+    r"credible\s+intervals?|sensitivity|specificity|AUROC|AUPRC|incidence|prevalence|mortality|survival|"
+    r"effect\s+sizes?|standard\s+deviations?|standard\s+errors?|correlation|coefficients?|elasticit(?:y|ies)|"
+    r"percentage\s+points?|basis\s+points?|R-squared|"
+    # physics / chemistry / quantum
+    r"significance|cross[- ]sections?|lifetimes?|masse?s?|uncertaint(?:y|ies)|yields?|enantiomeric\s+excess|"
+    r"selectivit(?:y|ies)|conversion|turnover\s+(?:numbers?|frequenc(?:y|ies))|half[- ]li(?:fe|ves)|band\s*gaps?|"
+    r"binding\s+energ(?:y|ies)|efficienc(?:y|ies)|fidelit(?:y|ies)")
+_METRIC_ABBR = (  # case-sensitive abbreviations, symbols and units (so that "OR" is not the word "or")
+    r"(?<![A-Za-z])(?:a?OR|a?HR|I?RR|CrI|CI|IQR|SD|SEM|SE|AUC|NNT|ICC|BMI|IC50|EC50|K_?[di]|TON|TOF|ee)(?![A-Za-z])|"
+    r"(?<![A-Za-z\\])[pP]\s*(?:[<=>≤≥]|\\[lg]eq?\b|\\[lg]t\b)|\\sigma\b|σ|"
+    r"(?<![A-Za-z])(?:[kMGT]?eV|Mpc|kpc|fb|pb|nb|[kMGT]?Hz|[nµμm]M|ppm|ppb|kcal/mol|kJ/mol|wt\s?%|mol\s?%)(?![A-Za-z])|"
+    r"M_\{?\\odot\}?|M_⊙|\\[Mm]sun\b|°C")
+_METRIC_RE = re.compile(f"(?i:\\b(?:{_METRIC_WORDS})\\b)|{_METRIC_ABBR}")
+# Not part of a name such as "top-1", "ResNet-50", "ImageNet-1K", nor a sub/superscript or a citation "[12]".
+# A hyphen only counts after a letter: "1.4--3.0" and "1.4–3.0" are ranges, "top-1" is a name.
+_VALUE_RE = re.compile(r"(?<![\w.\\^_{\[])(?<![A-Za-z]-)(\d+\.\d+|\d+)(?:\s*(\\?%))?(?![\w.\]])")
+_CMP_RE = re.compile(r"(<|>|≤|≥|\\leq?|\\geq?|\\lt|\\gt)\s*\$?\s*$")
+
+
+def _metric_key(m: str) -> str:
+    """Normalized metric name: "P <" and "p=" -> "p-value", units / abbreviations kept as written."""
+    t = m.strip()
+    if re.match(r"[pP]\s*(?:[<=>≤≥]|\\)", t) or re.match(r"(?i)p[- ]?values?", t):
+        return "p-value"
+    if t in ("σ", "\\sigma") or re.match(r"(?i)standard\s+deviations?|significance", t):
+        return "sigma"
+    if re.match(r"M_|\\[Mm]sun", t):
+        return "solar-mass"
+    return re.sub(r"\s+", " ", t.lower()).rstrip("s") if len(t) > 4 else t
+
+
+def _same_value(a: dict, b: dict) -> bool:
+    """Equal up to the coarser of the two precisions ("2" ~ "2.0" ~ "1.98"; "41.8" !~ "41.0"), or compatible
+    when one side is a bound ("p < 0.05" and "p = 0.03")."""
+    va, vb = a["value"], b["value"]
+    ca, cb = a.get("cmp"), b.get("cmp")
+    if ca or cb:
+        lt = lambda c: c in ("<", "≤") or (c or "").startswith(("\\le", "\\lt"))
+        if ca and cb:
+            return lt(ca) == lt(cb)
+        bound, val, c = (va, vb, ca) if ca else (vb, va, cb)
+        return val <= bound if lt(c) else val >= bound
+    dec = lambda r: len(r.split(".")[1]) if "." in r else 0
+    d = min(dec(a["raw"].rstrip("%")), dec(b["raw"].rstrip("%")))
+    return round(va, d) == round(vb, d)
 _STOP = set("""the and for with that this from our are was were has have been than which these those such into over
 under after before about also more less most best new using used use based model models task tasks score scores
 results result achieves achieve achieved reach reaches reported report previous previously state art single""".split())
@@ -227,30 +274,32 @@ class Checker:
                 for mm in _METRIC_RE.finditer(text, win_lo, win_hi):
                     d = abs(mm.start() - off)
                     if d < best:
-                        best, metric = d, mm.group(1)
+                        best, metric = d, _metric_key(mm.group(0))
                 if metric is None:
                     continue
+                cmp_m = _CMP_RE.search(text[max(a, off - 8):off])
                 words = re.findall(r"[A-Za-z][A-Za-z-]{2,}", re.sub(r"\\[A-Za-z]+", " ", sent))
                 toks = {w.lower() for w in words} - _STOP - {metric.lower()}
                 ents = {w.lower() for w in words if ("-" in w and any(c.isupper() for c in w)) or (w.isupper() and len(w) >= 3)}
                 ents -= {metric.lower()}
-                mentions.append({"value": float(raw), "raw": raw + ("%" if m.group(2) else ""), "metric": metric.lower(),
+                mentions.append({"value": float(raw), "raw": raw + ("%" if m.group(2) else ""), "metric": metric,
+                                 "cmp": cmp_m.group(1) if cmp_m else None,
                                  "off": off, "end": m.end(), "unit": nid, "sent": sent, "toks": toks, "ents": ents,
                                  "headline": nid in headline_units})
         seen = set()
         for b in mentions:
-            same = [a for a in mentions if a["headline"] and a["unit"] != b["unit"] and a["metric"] == b["metric"]
-                    and a["ents"] & b["ents"]]
+            same = [a for a in mentions if a["headline"] and a["unit"] != b["unit"] and a["metric"] == b["metric"]]
             scored = []
             for a in same:
                 sim = len(a["toks"] & b["toks"]) / max(1, min(len(a["toks"]), len(b["toks"])))
-                if sim >= 0.3:
+                # A shared named entity (dataset, experiment, drug) with some overlap, or a very similar sentence.
+                if (sim >= 0.3 and a["ents"] & b["ents"]) or sim >= 0.5:
                     scored.append((sim, a))
-            if not scored or any(abs(a["value"] - b["value"]) < 1e-9 for _, a in scored):
+            if not scored or any(_same_value(a, b) for _, a in scored):
                 continue
             sim, a = max(scored, key=lambda t: t[0])
             # Another number in A's sentence with B's value -> A talks about several quantities; skip.
-            if any(abs(float(x) - b["value"]) < 1e-9 for x in re.findall(r"\d+(?:\.\d+)?", a["sent"])):
+            if any(_same_value({"value": float(x), "raw": x}, b) for x in re.findall(r"\d+(?:\.\d+)?", a["sent"])):
                 continue
             key = tuple(sorted([(a["raw"], a["unit"]), (b["raw"], b["unit"])])) + (b["metric"],)
             if key in seen:
@@ -262,7 +311,8 @@ class Checker:
                 tab_note = "表格中出现了 " + "、".join(v for v, ok in in_tab.items() if ok) + \
                            ("，没有出现 " + "、".join(v for v, ok in in_tab.items() if not ok) if not all(in_tab.values()) else "") + "。"
             la, lb = loc_of(p, a["off"], a["end"]), loc_of(p, b["off"], b["end"])
-            metric = b["metric"].upper() if b["metric"] in ("bleu", "wer", "cer", "auc", "fid", "ppl", "f1", "mse", "mae", "rmse") else b["metric"]
+            metric = {"p-value": "p 值", "sigma": "显著性（σ）", "solar-mass": "质量（M⊙）"}.get(
+                b["metric"], b["metric"].upper() if b["metric"] in ("bleu", "wer", "cer", "fid", "ppl", "f1", "mse", "mae", "rmse") else b["metric"])
             r = self.add(category="numeric", severity="low",
                          title=f"{metric} 数值前后不一致：{a['raw']} 与 {b['raw']}",
                          description=f"相近的语境下，同一指标给出了不同的数值：{self._name(a['unit'])}（{la.file}:{la.line_start}）写的是 "

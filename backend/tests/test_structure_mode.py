@@ -97,6 +97,19 @@ class StructFake(BaseProvider):
                 "concepts": [{"term": "术语", "explanation": "解释", "ids": ["sec-1"]}],
                 "prerequisites": [{"name": "线性代数", "why": "到处用", "level": "basic"}],
                 "questions": [{"question": "问题？", "hint": "看第一节", "ids": ["sec-1"]}]}, {}
+        if schema_name == "derivation_steps":
+            assert "待审查推导" in blocks[1]
+            return {"steps": [{"step_id": "S1", "line": 20, "quote": "H = \\hbar\\omega", "claim": "代入 a",
+                               "justification": "定义", "uses": ["eq-1"], "hypotheses_check": "无"}]}, {}
+        if schema_name == "derivation_challenges":
+            return {"challenges": [{"challenge_id": "C1", "step_id": "S1", "category": "algebra", "line": 28,
+                                    "quote": "E_n = \\hbar\\omega", "concern": "从对易关系到能级跳过了基态论证",
+                                    "affects": "proof", "error_type": "logic", "severity": "medium"}]}, {}
+        if schema_name == "derivation_rebuttal":
+            return {"responses": [{"challenge_id": "C1", "stance": "minor", "response": "标准结果", "evidence_quote": ""}]}, {}
+        if schema_name == "derivation_verdict":
+            return {"verdicts": [{"challenge_id": "C1", "verdict": "minor", "severity": "medium",
+                                  "title": "能级推导跳步", "final_comment": "补一句基态论证"}]}, {}
         if schema_name == "meta_review":
             ids = re.findall(r"^### (\S+?)（", "\n".join(blocks), re.M)
             return {"decisions": [{"risk_id": i, "action": "keep", "merge_into": None,
@@ -165,3 +178,63 @@ def test_uploaded_latex_cannot_read_outside_files(tmp_path):
     figs = {f.id: f for f in F.build_figures(ctx, tmp_path / "out", render_latex=True, sandbox=True)}
     assert figs["tab-1"].images == []                 # the absolute path outside the paper is not readable
     assert figs["tab-2"].images == ["tab-2.png"]      # the paper's own files are
+
+
+def test_numeric_rules_for_statistics(tmp_path):
+    from paper_checkup.analysis.checks import _same_value
+
+    v = lambda raw, cmp=None: {"value": float(raw.rstrip("%")), "raw": raw, "cmp": cmp}
+    assert _same_value(v("2"), v("2.0")) and _same_value(v("1.98"), v("2"))    # coarser precision decides
+    assert not _same_value(v("41.8"), v("41.0"))
+    assert _same_value(v("0.05", "<"), v("0.03")) and not _same_value(v("0.05", "<"), v("0.07"))
+    (tmp_path / "main.tex").write_text(r"""\documentclass{article}
+\begin{document}
+\begin{abstract}
+In the TRIAL-7 cohort, treatment reduced readmission (OR 2.1, 95\% CI 1.4--3.0, $p<0.05$).
+\end{abstract}
+\section{Introduction}
+Readmission matters.
+\section{Results}
+In the TRIAL-7 cohort, treatment reduced readmission (OR 2.1, 95\% CI 1.4--3.1, $p=0.03$).
+\end{document}
+""")
+    ctx = analyze_structure(tmp_path)
+    titles = [r.title for r in ctx.risks if r.category == "numeric"]
+    assert any("3.0" in t and "3.1" in t for t in titles), titles      # the CI bound changed
+    assert not any("0.05" in t or "0.03" in t for t in titles), titles  # p < 0.05 and p = 0.03 agree
+
+
+DERIV = Path(__file__).parent / "fixtures" / "derivation"
+
+
+def test_derivation_targets_and_edges():
+    from paper_checkup.llm.stages import select_derivation_targets
+
+    ctx = analyze_structure(DERIV)
+    assert ctx.gb.mode == "structure"
+    assert select_derivation_targets(ctx) == ["sec-3"]          # 3 displays; the Model section has only 1
+    e = _edges(ctx)
+    assert ("eq-1", "eq-2") in e and ("eq-2", "eq-4") in e and ("eq-3", "eq-4") in e   # "Combining (2) and (3), ..."
+    assert select_derivation_targets(analyze_structure(FIXTURE)) == []                 # the empirical paper has none
+
+
+def test_derivation_review_with_fake_llm(monkeypatch, tmp_path):
+    fake = StructFake()
+    monkeypatch.setattr(LLMClient, "provider_for", lambda self, role: fake)
+    cfg = LLMConfig(enabled=True, provider="fake", models={"extract": "fake", "author": "fake", "reviewer": "fake"},
+                    cache_dir=tmp_path)
+    rep = asyncio.run(run_pipeline(DERIV, config=cfg, use_cache=False))
+    st = {s.name: s for s in rep.pipeline.stages}
+    assert st["derivation_review"].status == "done"
+    d = [r for r in rep.risks if r.id.startswith("D")]
+    # a "minor" verdict is capped at low before the (fake) meta-review regrades it
+    assert d and d[0].category == "algebra" and d[0].status == "minor" and (d[0].original_severity or d[0].severity) == "low"
+    assert d[0].node_ids[0] == "sec-3"
+    sec = next(n for n in rep.nodes if n.id == "sec-3")
+    assert sec.review and sec.review["kind"] == "derivation"
+    # the empirical paper: no derivation stage calls at all
+    fake2 = StructFake()
+    monkeypatch.setattr(LLMClient, "provider_for", lambda self, role: fake2)
+    rep2 = asyncio.run(run_pipeline(FIXTURE, config=cfg, use_cache=False))
+    assert {s.name: s for s in rep2.pipeline.stages}["derivation_review"].status == "skipped"
+    assert not any(n.startswith("derivation") for _, n in fake2.calls)

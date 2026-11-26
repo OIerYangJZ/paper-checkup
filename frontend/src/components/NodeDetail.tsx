@@ -68,7 +68,7 @@ export function NodeDetail({ id }: { id: string | null }) {
   const symbols = report.symbols.filter((s) => n.symbols_used.includes(s.id));
   const parent = n.parent ? index.nodes.get(n.parent) : undefined;
   const structural = STRUCT_KINDS.has(n.kind);
-  const reviewName = n.kind === "assertion" ? "论断审查" : "审稿对抗";
+  const reviewName = n.kind === "assertion" ? "论断审查" : n.review?.kind === "derivation" ? "推导审查" : "审稿对抗";
   const stmtTitle =
     n.kind === "section" ? "正文（本节自身的文字，不含小节）" : n.kind === "assertion" ? "论断原文" : ["figure", "table", "pseudocode", "listing"].includes(n.kind) ? "题注" : "陈述";
 

@@ -1,0 +1,34 @@
+\documentclass{article}
+\begin{document}
+\title{A Toy Oscillator}
+\maketitle
+\begin{abstract}
+We derive the energy levels of a toy oscillator.
+\end{abstract}
+
+\section{Introduction}
+We study a harmonic oscillator.
+
+\section{Model}\label{sec:model}
+The Hamiltonian is
+\begin{equation}\label{eq:H}
+H = \frac{p^2}{2m} + \frac{1}{2} m \omega^2 x^2 .
+\end{equation}
+
+\section{Derivation}\label{sec:deriv}
+Introducing $a = \sqrt{m\omega/2\hbar}\,(x + i p/m\omega)$, Eq.~\eqref{eq:H} becomes
+\begin{equation}\label{eq:Ha}
+H = \hbar\omega\left(a^\dagger a + \tfrac12\right).
+\end{equation}
+Using $[a, a^\dagger] = 1$ we find
+\begin{equation}\label{eq:comm}
+[H, a^\dagger] = \hbar\omega\, a^\dagger .
+\end{equation}
+Combining \eqref{eq:Ha} and \eqref{eq:comm},
+\begin{equation}\label{eq:E}
+E_n = \hbar\omega\left(n + \tfrac12\right).
+\end{equation}
+
+\section{Conclusion}
+The spectrum is equally spaced.
+\end{document}

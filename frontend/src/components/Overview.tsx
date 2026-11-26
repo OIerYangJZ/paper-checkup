@@ -89,7 +89,8 @@ export function Overview({ onSection }: { onSection: (ids: string[]) => void }) 
           <div>
             <strong>结构模式</strong>：这篇论文没有定理类环境（theorem / lemma / proposition …），因此以<strong>章节、图表和编号公式</strong>为节点构建依赖图，
             体检对象是论文的<strong>核心论断</strong>——每条论断附原文引语，由作者智能体给出论文中的证据、审稿人智能体逐条质疑；
-            另外由程序交叉核对摘要、引言、结论中的数字与正文和表格是否一致。
+            公式推导密集的章节另做<strong>推导审查</strong>（逐步核对代数、近似条件、量纲与极限检验）；
+            另外由程序交叉核对摘要、引言、结论中的数字（含 p 值、置信区间、σ、物理单位等）与正文和表格是否一致。
           </div>
         </div>
       ) : null}

@@ -72,6 +72,10 @@ export const CATEGORY_LABEL: Record<string, string> = {
   comparison: "比较不对等",
   attribution: "归因缺乏对照",
   reproducibility: "可复现性",
+  algebra: "计算错误",
+  approximation: "近似条件",
+  dimension: "量纲",
+  limit: "极限 / 特例检验",
   other: "其他",
 };
 

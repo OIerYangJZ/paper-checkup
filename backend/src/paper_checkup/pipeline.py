@@ -31,6 +31,7 @@ STAGES = [
     ("review", "审稿对抗"),
     ("claims", "核心论断提取"),
     ("claim_review", "论断审查"),
+    ("derivation_review", "推导审查"),
     ("numeric_check", "数字一致性核查"),
     ("external_merge", "外部知识合并"),
     ("meta_review", "主审复核"),
@@ -146,11 +147,14 @@ async def run_pipeline(root: Path, *, paper_id: str | None = None, arxiv_id: str
         tracker.done("parse", f"{sum(1 for n in ctx.nodes.values() if n.kind not in ('equation', 'external'))} 个条目，{len(ctx.edges)} 条依赖")
     # Stages that do not apply to this kind of paper.
     no_blocks = not ctx.paper.blocks
-    for name in (("claims", "claim_review", "numeric_check") if not structure else
+    for name in (("claims", "claim_review", "numeric_check", "derivation_review") if not structure else
                  (("proof_owner", "implicit", "unsupported", "review") if no_blocks else ())):
         if tracker.stages[name].status == "pending":
             tracker.stages[name].status = "skipped"
             tracker.stages[name].detail += "（不适用于" + ("定理类论文" if not structure else "没有定理类环境的论文") + "）"
+    if structure and tracker.stages["derivation_review"].status == "pending" and not stages.select_derivation_targets(ctx):
+        tracker.stages["derivation_review"].status = "skipped"
+        tracker.stages["derivation_review"].detail += "（本文没有公式推导密集的章节）"
     tracker.stages["checks"].status = "done"
     if partial:
         partial(assemble_report(ctx, _pipeline_info(cfg, None, tracker, llm_on, budget_note=day_note)))
@@ -218,6 +222,10 @@ async def run_pipeline(root: Path, *, paper_id: str | None = None, arxiv_id: str
                                       + (f"；{s['budget_skipped']} 个因预算未审" if s.get("budget_skipped") else "")))
     if structure:
         jobs.append(claims_then_review())
+        if applies("derivation_review"):
+            jobs.append(guarded("derivation_review", lambda: stages.stage_derivation_review(ctx, client, progress=step("derivation_review")),
+                                lambda s: f"审查 {s['targets']} 节推导，{s['risks']} 个未解决的风险点、{s.get('minor', 0)} 个次要问题"
+                                          + (f"；{s['budget_skipped']} 节因预算未审" if s.get("budget_skipped") else "")))
         jobs.append(guarded("numeric_check", lambda: stages.stage_numeric_check(ctx, client, step("numeric_check")),
                             lambda s: f"核对 {s.get('checked', 0)} 个候选，确认 {s.get('confirmed', 0)} 个、排除 {s.get('dismissed', 0)} 个"))
     await asyncio.gather(*jobs)

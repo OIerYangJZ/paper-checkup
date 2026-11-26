@@ -329,6 +329,12 @@ def structure_system(lang: str) -> str:
    - degenerate_or_convention：只涉及领域通行约定——最高 info；
    - logic：论断与证据的关系本身有问题（包括无法判断哪个才是真实结果的数字矛盾）——按标准定级。
 6. 只评价论文写出的论断是否被论文自己的证据支撑。不要提出文风、写作动机、未来工作之类的意见；不要因为“还可以多做一个实验”就提质疑——只有当某个论断确实依赖那项证据时才指出它缺失。
+7. 审查公式推导时（推导审查），严重程度按以下标准：
+   - high：推导出的主要结果按其写法是错的——给出了具体的反例，或极限 / 特例检验、量纲检验明确失败；
+   - medium：某一步需要实质性的补充论证（未说明的近似及其适用范围、非平凡的跳步、依赖了未说明的条件），但结果很可能成立；
+   - low：笔误、符号、因子或下标错误，且可直接修正、不影响后续结果；
+   - info：只涉及约定（单位制、度规符号、归一化约定）。
+   善意阅读同样适用：领域内的标准近似和常用恒等式不需要论文逐一证明；先在全文中查找该步骤是否已在别处说明。
 {lang_line(lang)}"""
 
 
@@ -446,3 +452,54 @@ GUIDE_TASK = """## 你的角色：导读老师
 - concepts：6～15 个关键概念或记号：term、通俗解释 explanation、ids（定义或首次出现的位置）。
 - prerequisites：3～8 项需要预先了解的背景知识：name、why（论文哪里用到它）、level（basic / intermediate / advanced）。
 - questions：4～8 个帮助自测是否读懂的问题：question、hint（提示去看哪里、从什么角度想，不直接给出答案）、ids。"""
+
+
+# ---------------------------------------------------------------------------
+# Structure mode: derivation review (sections dense in displayed equations, e.g. theoretical physics)
+# ---------------------------------------------------------------------------
+
+DERIVATION_AUTHOR_ROLE = """## 你的角色：论文作者
+你熟悉全文。为这一节的公式推导给出依据：每一步从哪些公式、用什么代换、恒等式、近似或定义得到下一式，近似成立的条件是什么、在此处如何满足。
+辩护时可以引用全文任何位置的内容。只有当问题在称职读者的理解下确实存在时才承认（concede）；若问题真实但只是笔误、因子或符号写错且不影响结果，回答 minor 并说明为何不影响；若论文已有依据，回答 defend 并给出原文。"""
+
+DERIVATION_REVIEWER_ROLE = """## 你的角色：审稿人
+严格但公正，逐步核对这一节的推导。重点检查：
+- algebra：代数运算、符号、因子、下标与求和是否正确（能验算的就自己验算一遍）；
+- approximation：用到的近似或展开是否说明了适用条件、在此处是否成立；
+- gap：被一笔带过但确实非平凡、读者难以自行补全的步骤；
+- symbol：同一符号前后含义不一致，或未定义即使用；
+- dimension：量纲或单位是否一致；
+- limit：已知的极限或特例（如退化参数、经典极限、已知结果）是否得到正确的回归。
+每个质疑必须指向原文中具体的一句或一式（逐字引用并给出行号），具体说明哪一步有问题、错在哪里（能给出正确形式的请写出），并按统一标准定级。没有问题时返回空列表。"""
+
+DERIVATION_AUTHOR_TASK = """请把上面这一节的推导分解为 3～12 个关键步骤。对每一步：
+- step_id：S1、S2…；line：该步骤所在行号；quote：这一步在原文中的一句或一式（逐字）；
+- claim：这一步得出了什么（如“由式 (2.3) 代入 (2.1) 得到 (2.5)”）；justification：依据（代换、恒等式、近似、定义，可引用全文任何位置）；
+- uses：用到的公式 / 章节 id（eq-… / sec-…）或外部结果名称；
+- hypotheses_check：用到近似或条件时，说明其适用条件以及在此处如何满足（不涉及时写“无”）。"""
+
+DERIVATION_CHALLENGES_SCHEMA = obj({"challenges": arr(obj({
+    "challenge_id": S,
+    "step_id": nullable(S),
+    "category": enum("algebra", "approximation", "gap", "symbol", "dimension", "limit", "other"),
+    "line": I,
+    "quote": S,
+    "concern": S,
+    "affects": enum("statement", "proof"),
+    "error_type": enum("logic", "pseudocode_or_typesetting", "typo_or_notation", "degenerate_or_convention"),
+    "severity": SEV,
+}))})
+
+DERIVATION_REVIEWER_TASK = """以上是作者对这一节推导步骤的说明。请逐步核对（也包括作者没有列出的步骤），只对确有疑问之处提出质疑。
+对每个质疑：challenge_id（C1、C2…）、对应的 step_id（若有）、category、line、quote（逐字引用原文）、concern（哪一步、错在哪里、正确形式是什么；做了验算或极限检验的请写出过程要点）、
+affects（statement：影响这一节推出的结果；proof：只影响推导过程的写法）、error_type、按统一标准且不超过该类型上限的 severity。提出之前先确认全文其他位置没有处理这个问题。"""
+
+DERIVATION_REBUTTAL_TASK = """审稿人对这一节的推导提出了以上质疑。请逐条回应：
+- stance：defend（论文中已有充分依据，给出原文）、minor（问题真实但只是笔误 / 因子或符号写错、不影响结果）、partial（部分成立）、concede（问题确实存在）；
+- response：你的理由（必要时写出验算过程）；evidence_quote：论文中支持你的原文（逐字，可来自全文任何位置；没有就填空字符串）。"""
+
+DERIVATION_VERDICT_TASK = """作者已经对你的质疑逐条回应。请逐条裁决：
+- resolved：作者给出的依据确实存在于论文中、或验算表明该步正确；
+- minor：问题真实，但只是笔误、因子或符号写错，且不影响结果；
+- unresolved：问题实质存在（作者承认，或依据不充分、验算不成立）。
+对每一条给出 title（不超过 30 字）、按统一标准重新确认的 severity，以及 final_comment（unresolved / minor 时说明读者需要自己核查什么、正确形式是什么；resolved 时一句话说明为何接受）。"""

@@ -30,6 +30,7 @@ export interface ExternalInfo {
 export interface ReviewInfo {
   status: "passed" | "issues" | "error" | "skipped";
   reason?: string; // "budget": skipped because the spend limit was reached
+  kind?: string; // "derivation" for the derivation review of a section
   steps?: number;
   challenges?: number;
   unresolved?: number;

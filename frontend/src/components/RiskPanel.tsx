@@ -25,7 +25,17 @@ export function RiskCard({ risk, compact = false }: { risk: Risk; compact?: bool
           </Tag>
         ) : null}
         <Tag tone={risk.source === "review" ? "purple" : "grey"}>
-          {risk.source === "review" ? (risk.id.startsWith("Q") ? "论断审查" : risk.category === "numeric" ? "数字核对" : "审稿对抗") : risk.category === "numeric" ? "数字核对（程序）" : "结构检查"}
+          {risk.source === "review"
+            ? risk.id.startsWith("Q")
+              ? "论断审查"
+              : risk.id.startsWith("D")
+                ? "推导审查"
+                : risk.category === "numeric"
+                  ? "数字核对"
+                  : "审稿对抗"
+            : risk.category === "numeric"
+              ? "数字核对（程序）"
+              : "结构检查"}
         </Tag>
         {compact ? null : (
           <button className="link-btn right" onClick={() => showRisk(risk.id)} title="在图中显示相关条目">
@@ -128,7 +138,8 @@ export function RiskPanel() {
   const passed = reviewed.filter((n) => n.review?.status === "passed").length;
   const structure = report.paper.mode === "structure";
   const claims = reviewed.filter((n) => n.kind === "assertion");
-  const proofs = reviewed.filter((n) => n.kind !== "assertion");
+  const derivations = reviewed.filter((n) => n.review?.kind === "derivation");
+  const proofs = reviewed.filter((n) => n.kind !== "assertion" && n.review?.kind !== "derivation");
   const budgetSkipped = report.nodes.filter((n) => n.review?.reason === "budget").length;
 
   return (
@@ -156,10 +167,11 @@ export function RiskPanel() {
           <Info size={15} />
           {structure ? (
             <span>
-              这篇论文没有定理类环境，体检对象是核心论断：共审查 {claims.length} 条论断
-              {proofs.length ? `和 ${proofs.length} 个证明` : ""}，其中 {passed} 项的所有质疑都被作者智能体以论文中的证据化解；
+              这篇论文没有定理类环境，体检对象是核心论断与公式推导：共审查 {claims.length} 条论断
+              {derivations.length ? `、${derivations.length} 节推导` : ""}
+              {proofs.length ? `和 ${proofs.length} 个证明` : ""}，其中 {passed} 项的所有质疑都被作者智能体以论文中的依据化解；
               下面只列出双方没能达成一致、作者承认、或双方认为次要的问题，并经主审复核合并重复、统一定级。
-              “高”表示核心论断与论文自己的证据矛盾，“中”表示证据弱于论断（比较不对等、缺少对照等）。“数字核对”先由程序找出同一指标前后取值不同的地方，再由审稿人智能体逐条确认。
+              “高”表示核心论断与论文自己的证据矛盾、或推导出的结果有误，“中”表示证据弱于论断（比较不对等、缺少对照等）或推导需要实质补证。“数字核对”先由程序找出同一指标前后取值不同的地方，再由审稿人智能体逐条确认。
               {budgetSkipped ? `（另有 ${budgetSkipped} 项因花费上限没有审查。）` : ""}
             </span>
           ) : (
