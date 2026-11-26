@@ -403,7 +403,7 @@ class LLMClient:
                    max_tokens: int | None = None, attempts: int = 2, use_disk_cache: bool = True,
                    budget_reserve: float = 0.1) -> dict:
         """One structured call. `budget_reserve` is the fraction of the budget this call may not dip into
-        (kept for the final meta-review, which passes 0)."""
+        (kept for the final meta-review, which passes 0; the cheap reading guide passes -0.1, i.e. may overrun 10%)."""
         prov = self.provider_for(role)
         # Reasoning/thinking tokens count against the output cap, so never go below the configured cap.
         max_tokens = max(max_tokens or 0, self.config.max_tokens)

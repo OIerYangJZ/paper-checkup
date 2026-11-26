@@ -1071,8 +1071,9 @@ async def stage_guide(ctx: AnalysisContext, client: LLMClient, progress: Progres
     if risks:
         task += "\n\n## 体检发现的风险点（高 / 中）\n" + "\n".join(
             f"- {r.id}（{ {'high': '高', 'medium': '中'}[r.severity] }，{', '.join(r.node_ids[:3])}）{r.title}" for r in risks)
+    # The guide is the readers' entry point and costs about a cent (flash): it may overrun the limit by 10%.
     data = await client.json("extract", _system(ctx, client), [paper_prefix(ctx), task], P.GUIDE_SCHEMA, "guide",
-                             max_tokens=16000, budget_reserve=0.0)
+                             max_tokens=16000, budget_reserve=-0.1)
     valid = set(ctx.nodes) | {s.id for s in ctx.gb.sections} | {r.id for r in ctx.risks} | \
         {f.id for f in (ctx.extra.get("figures") or [])} | {f.id for f in ctx.paper.floats}
 

@@ -62,9 +62,10 @@ def test_job_budget_stops_calls_and_keeps_meta_reserve(monkeypatch, tmp_path):
     budget = Budget(per_job=6.0)
     rep = asyncio.run(run_pipeline(FIXTURE, config=_cfg(tmp_path), use_cache=False, budget=budget))
     p = rep.pipeline
-    # Calls are refused once 90% of the budget is spent (the rest is kept for the meta-review), so the total
-    # stays within one call of the limit.
-    assert p.cost_usd <= 6.0 + 1.0 and p.budget_note and "已用完" in p.budget_note
+    # Calls are refused once 90% of the budget is spent (the rest is kept for the meta-review); the reading guide
+    # may still run up to 110% (it costs about a cent in reality, $1 in this fake). So: limit + one in-flight call
+    # + the guide.
+    assert p.cost_usd <= 6.0 + 2.0 and p.budget_note and "已用完" in p.budget_note
     assert p.budget_usd == 6.0
     skipped = [n for n in rep.nodes if (n.review or {}).get("reason") == "budget"]
     assert skipped, "some review targets should be skipped for budget"
