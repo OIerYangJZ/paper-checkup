@@ -3,7 +3,7 @@ import { Cpu, Download, ExternalLink } from "lucide-react";
 import { Home } from "./components/Home";
 import { Logo } from "./components/Logo";
 import { PaperView } from "./components/PaperView";
-import { health as fetchHealth, jobReport, loadPresetReport, loadPresets } from "./lib/api";
+import { HttpError, health as fetchHealth, jobReport, loadPresetReport, loadPresets, rememberRunningJob } from "./lib/api";
 import { renderInline } from "./lib/latex";
 import type { Health, PresetEntry, Report } from "./types";
 
@@ -42,7 +42,21 @@ export default function App() {
   }, []);
   useEffect(() => {
     loadPresets().then(setPresets);
-    fetchHealth().then(setHealth);
+    // A failed first contact with the API is often just the relay being slow: keep trying in the background, so
+    // live analysis switches on by itself once the connection works (presets are usable meanwhile).
+    let stop = false;
+    let t: number | undefined;
+    const check = async () => {
+      const h = await fetchHealth();
+      if (stop) return;
+      setHealth((prev) => (h ?? (prev ? prev : null)));
+      if (!h) t = window.setTimeout(check, 20000);
+    };
+    check();
+    return () => {
+      stop = true;
+      window.clearTimeout(t);
+    };
   }, []);
 
   // Load the report for the current route.
@@ -73,7 +87,19 @@ export default function App() {
           setReport(r);
           setReportKey(key);
         })
-        .catch((e) => setError(`无法加载任务报告：${e}`))
+        .catch((e) => {
+          if (e instanceof HttpError && e.status === 409) {
+            // Still running: show its progress on the home page (the upload panel resumes polling this job).
+            rememberRunningJob(route.id);
+            location.hash = "#/";
+            return;
+          }
+          setError(
+            e instanceof HttpError
+              ? `无法加载任务报告：${e.message}`
+              : "无法连接分析服务（网络不稳定），请稍后刷新页面重试。",
+          );
+        })
         .finally(() => setLoading(false));
     } else if (route.page === "local" && !report) {
       location.hash = "#/";

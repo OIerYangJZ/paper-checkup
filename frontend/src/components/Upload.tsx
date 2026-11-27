@@ -1,6 +1,16 @@
 import { Cpu, FileText, FolderOpen, Info, KeyRound, Link2, Stethoscope, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { jobReport, jobStatus, startAnalysis } from "../lib/api";
+import {
+  HttpError,
+  forgetRunningJob,
+  isNetworkError,
+  jobReport,
+  jobStatus,
+  newClientId,
+  rememberRunningJob,
+  runningJob,
+  startAnalysis,
+} from "../lib/api";
 import type { Health, JobStatus, Report } from "../types";
 
 const STAGE_ICON: Record<string, string> = { done: "✓", skipped: "—", error: "✗", running: "⟳", pending: "·" };
@@ -15,39 +25,92 @@ export function UploadPanel({ health, onOpen }: { health: Health | null | undefi
   const [jobId, setJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [drag, setDrag] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [netTrouble, setNetTrouble] = useState(false);
   const timer = useRef<number | null>(null);
+  const alive = useRef(true);
+  // One id per chosen input: clicking "开始体检" again after a lost response is recognised by the server as the
+  // same upload, not a second paid analysis of the same paper.
+  const clientId = useRef(newClientId());
   const fileInput = useRef<HTMLInputElement>(null);
   const jsonInput = useRef<HTMLInputElement>(null);
   const llmAvailable = !!health?.llm.enabled;
 
-  useEffect(() => () => {
-    if (timer.current) window.clearInterval(timer.current);
+  useEffect(() => {
+    alive.current = true;
+    const saved = runningJob();   // resume a job started before the page was reloaded
+    if (saved) {
+      setJobId(saved);
+      poll(saved);
+    }
+    return () => {
+      alive.current = false;
+      if (timer.current) window.clearTimeout(timer.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const pickInput = (f: File[], a: string) => {
+    setFiles(f);
+    setArxiv(a);
+    clientId.current = newClientId();
+  };
+
+  // Poll until the job ends. The link to the server drops requests now and then, so a failed poll is retried
+  // (the job keeps running on the server) and only a long outage or a real error from the server ends it.
   const poll = (id: string) => {
-    if (timer.current) window.clearInterval(timer.current);
-    timer.current = window.setInterval(async () => {
+    if (timer.current) window.clearTimeout(timer.current);
+    let failingSince: number | null = null;
+    const finish = (msg?: string) => {
+      forgetRunningJob(id);
+      setNetTrouble(false);
+      if (msg) setError(msg);
+    };
+    const tick = async () => {
+      if (!alive.current) return;
       try {
         const st = await jobStatus(id);
+        failingSince = null;
+        setNetTrouble(false);
         setJob(st);
         if (st.status === "done") {
-          window.clearInterval(timer.current!);
           const rep = await jobReport(id);
+          finish();
           onOpen(rep, id);
-        } else if (st.status === "error") {
-          window.clearInterval(timer.current!);
-          setError(st.error ?? "分析失败");
+          return;
         }
+        if (st.status === "error") return finish(st.error ?? "分析失败");
       } catch (e) {
-        window.clearInterval(timer.current!);
-        setError(String(e));
+        if (e instanceof HttpError && e.status === 404) {
+          // The server was restarted: the job list is gone, but a finished report is still on disk.
+          try {
+            const rep = await jobReport(id);
+            finish();
+            onOpen(rep, id);
+          } catch {
+            setJobId(null);
+            finish("服务器上找不到这个任务（分析服务可能重启过），请重新上传。");
+          }
+          return;
+        }
+        if (!isNetworkError(e)) return finish(e instanceof Error ? e.message : String(e));
+        failingSince ??= Date.now();
+        setNetTrouble(true);
+        if (Date.now() - failingSince > 10 * 60e3) {
+          setNetTrouble(false);
+          setError("和分析服务的连接已中断超过 10 分钟。任务仍在服务器上运行，稍后刷新本页或打开下面的任务链接查看结果。");
+          return;
+        }
       }
-    }, 1500);
+      if (alive.current) timer.current = window.setTimeout(tick, 2000);
+    };
+    tick();
   };
 
   const submit = async () => {
     setError(null);
     setJob(null);
+    setSubmitting(true);
     try {
       const id = await startAnalysis({
         files: arxiv.trim() ? [] : files,
@@ -55,12 +118,23 @@ export function UploadPanel({ health, onOpen }: { health: Health | null | undefi
         useLlm: useLlm && llmAvailable,
         reviewMax,
         accessToken: accessToken.trim() || undefined,
+        clientId: clientId.current,
       });
       if (accessToken.trim()) localStorage.setItem("pc-access-code", accessToken.trim());
+      rememberRunningJob(id);
       setJobId(id);
       poll(id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      // After a network failure the id is kept, so the next click is matched to the upload the server may already
+      // have; after a rejection by the server it is renewed.
+      if (!(e instanceof HttpError)) {
+        setError("上传请求没有得到分析服务的响应（网络不稳定，已自动重试 4 次）。请稍后再点一次「开始体检」；如果服务器其实已经收到，不会重复分析。");
+      } else {
+        clientId.current = newClientId();
+        setError(e.message);
+      }
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -92,7 +166,8 @@ export function UploadPanel({ health, onOpen }: { health: Health | null | undefi
         <div className="note warn" style={{ gridColumn: "1 / -1", margin: 0 }}>
           <Info size={15} />
           <span>
-            没有连接到后端服务，实时分析不可用（预置报告不受影响）。在项目目录运行 <code>cd backend && uv run paper-checkup serve</code> 后刷新页面。
+            暂时连不上分析服务，实时分析不可用（预置报告不受影响）；页面每 20 秒自动重试，连上后这里会自动恢复。本地运行时请先在项目目录运行{" "}
+            <code>cd backend && uv run paper-checkup serve</code>。
           </span>
         </div>
       ) : null}
@@ -107,8 +182,7 @@ export function UploadPanel({ health, onOpen }: { health: Health | null | undefi
           onDrop={(e) => {
             e.preventDefault();
             setDrag(false);
-            setFiles([...e.dataTransfer.files]);
-            setArxiv("");
+            pickInput([...e.dataTransfer.files], "");
           }}
           onClick={() => !backendDown && fileInput.current?.click()}
         >
@@ -136,10 +210,7 @@ export function UploadPanel({ health, onOpen }: { health: Health | null | undefi
             multiple
             hidden
             accept=".tex,.zip,.gz,.tgz,.tar,.bbl,.bib,.sty,.cls"
-            onChange={(e) => {
-              setFiles([...(e.target.files ?? [])]);
-              setArxiv("");
-            }}
+            onChange={(e) => pickInput([...(e.target.files ?? [])], "")}
           />
         </div>
       </div>
@@ -151,10 +222,7 @@ export function UploadPanel({ health, onOpen }: { health: Health | null | undefi
             placeholder="或填写 arXiv 编号，如 1212.0506"
             value={arxiv}
             disabled={backendDown}
-            onChange={(e) => {
-              setArxiv(e.target.value);
-              if (e.target.value) setFiles([]);
-            }}
+            onChange={(e) => pickInput(e.target.value ? [] : files, e.target.value)}
           />
         </div>
         <div className="upload-options">
@@ -201,8 +269,12 @@ export function UploadPanel({ health, onOpen }: { health: Health | null | undefi
           ) : null}
         </div>
         <div className="upload-actions">
-          <button className="btn-primary" disabled={backendDown || !!running || (!files.length && !arxiv.trim())} onClick={submit}>
-            <Stethoscope size={15} /> {running ? "分析中…" : "开始体检"}
+          <button
+            className="btn-primary"
+            disabled={backendDown || submitting || !!running || (!files.length && !arxiv.trim())}
+            onClick={submit}
+          >
+            <Stethoscope size={15} /> {submitting ? "上传中…" : running ? "分析中…" : "开始体检"}
           </button>
           <button className="btn" onClick={() => jsonInput.current?.click()}>
             <FolderOpen size={15} /> 打开报告 JSON
@@ -215,9 +287,25 @@ export function UploadPanel({ health, onOpen }: { health: Health | null | undefi
           <Info size={15} /> {error}
         </div>
       ) : null}
+      {jobId && !job ? (
+        <div className="job">
+          {!error ? <div className="job-msg">{netTrouble ? "网络不稳定，正在重新连接分析服务…" : "正在获取任务进度…"}</div> : null}
+          <div className="muted small">
+            任务链接：<a href={`#/job/${jobId}`}>{`#/job/${jobId}`}</a>
+          </div>
+        </div>
+      ) : null}
       {job ? (
         <div className="job">
           <div className="job-msg">{job.message}</div>
+          {netTrouble && (job.status === "running" || job.status === "queued") ? (
+            <div className="muted small warn-text">网络不稳定，正在重新连接…（分析在服务器上继续进行，不受影响）</div>
+          ) : null}
+          {jobId && job.status !== "done" ? (
+            <div className="muted small">
+              任务链接：<a href={`#/job/${jobId}`}>{`#/job/${jobId}`}</a>（关掉页面也没关系，分析完成后打开这个链接即可查看）
+            </div>
+          ) : null}
           <ul className="stage-list">
             {job.stages.map((s) => {
               const pr = job.progress[s.name];

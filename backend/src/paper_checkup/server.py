@@ -47,6 +47,11 @@ class Job:
 
 
 JOBS: dict[str, Job] = {}
+# The browser retries an upload whose response was lost on a flaky link (the Funnel relay drops requests now and
+# then); it sends the same client_id each time, and a repeat gets the job of the first attempt instead of a second,
+# paid, run of the same paper.
+CLIENT_JOBS: dict[str, str] = {}
+_CLIENT_ID = __import__("re").compile(r"^[A-Za-z0-9_-]{8,64}$")
 _job_sem = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 _tasks: set[asyncio.Task] = set()
 
@@ -137,19 +142,30 @@ async def _run_job(job: Job, root: Path, arxiv_id: str | None, use_llm: bool, re
 @app.post("/api/analyze")
 async def analyze(files: list[UploadFile] | None = File(default=None), arxiv_id: str | None = Form(default=None),
                   use_llm: bool = Form(default=True), review_max: int | None = Form(default=None),
-                  access_token: str | None = Form(default=None)):
+                  access_token: str | None = Form(default=None), client_id: str | None = Form(default=None)):
     if use_llm and not _token_ok(access_token):
         raise HTTPException(403, "运行大模型阶段需要访问口令（口令错误或未填写）；不填口令可以只做确定性分析。")
-    job = Job(id=uuid.uuid4().hex[:12])
+    cid = client_id.strip() if client_id and _CLIENT_ID.match(client_id.strip()) else None
+    prev = JOBS.get(CLIENT_JOBS.get(cid, "")) if cid else None
+    if prev is not None and prev.status != "error":     # after an error, trying again means a fresh run
+        log.info("repeated upload %s -> job %s", cid, prev.id)
+        return {"job_id": prev.id}
+    job = Job(id=uuid.uuid4().hex[:12], message="正在接收上传")
+    # Registered before the upload is read, so that a retry arriving meanwhile is matched to this job.
+    JOBS[job.id] = job
+    if cid:
+        CLIENT_JOBS[cid] = job.id
     job_dir = UPLOAD_DIR / job.id
     root = job_dir / "src"
     root.mkdir(parents=True, exist_ok=True)
     names = [f.filename or "?" for f in files or []]
 
     def reject(code: int, msg: str):
-        # Log why (the access log only shows the status code) and drop the half-created upload directory.
+        # Log why (the access log only shows the status code) and drop the half-created upload directory; the job
+        # is marked as an error (a retry of the same upload is then checked afresh and rejected again).
         log.warning("rejected upload %s (%s): %s", job.id, ", ".join(names) or arxiv_id or "-", msg)
         shutil.rmtree(job_dir, ignore_errors=True)
+        job.status, job.error, job.message = "error", msg, "上传被拒绝"
         raise HTTPException(code, msg)
 
     aid = None
@@ -178,7 +194,7 @@ async def analyze(files: list[UploadFile] | None = File(default=None), arxiv_id:
         reject(400, "请上传文件或填写 arXiv 编号")
     if review_max is not None:
         review_max = max(0, min(review_max, 80))
-    JOBS[job.id] = job
+    job.message = "排队中"
     task = asyncio.create_task(_run_job(job, root, aid, use_llm, review_max, arxiv_src))
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
